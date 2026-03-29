@@ -4,7 +4,8 @@
 
 ## 🚀 Features
 
-- **Safe Mode by Default:** Avoids updates in system paths (System Python, System Ruby, global npm) to protect your OS, unless aggressive mode is enabled.
+- **Safe Mode by Default:** Avoids updates in system paths (System Python, System Ruby, global npm) to protect your OS. It smartly detects localized version managers (`NVM`, `ASDF`, `Pyenv`, `Rbenv`) and safely applies updates within them.
+- **Alternative Package Managers:** Natively detects and updates global packages via `pnpm` and `yarn` as an alternative to `npm`.
 - **Fast Mode (Parallel Execution):** Runs independent tasks concurrently to save time.
 - **Auto-Update:** Automatically checks for newer versions in the GitHub repository and updates itself.
 - **Smart Tool Installation:** Detects if essential tools (like Homebrew) are missing and offers to install them on the fly.
@@ -36,10 +37,11 @@ mac-dev-up [options]
 - `--all`         Run all supported updates (default behavior).
 - `--brew`        Update Homebrew packages and casks.
 - `--python`      Update Python packages (pip, setuptools, wheel).
-- `--npm`         Update global npm packages.
-- `--ruby`        Update RubyGems.
+- `--npm`         Update global npm packages (automatically falls back to `pnpm` or `yarn` if detected).
+- `--ruby`        Update RubyGems (respects `Rbenv` and `ASDF`).
 - `--macos`       Check and install macOS software updates.
 - `--composer`    Update Composer globally.
+- `--rust`        Update Rust toolchain via `rustup`.
 
 ### Execution Modes
 - `--safe`        Safe mode (default). Skips system directories to prevent breaking macOS.
