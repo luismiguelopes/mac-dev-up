@@ -2,13 +2,13 @@
 
 # ==============================================================================
 # mac-dev-up: Safe macOS Dev Environment Updater
-# Version: 1.0.1
+# Version: 1.0.2
 # ==============================================================================
 
 set -euo pipefail
 IFS=$'\n\t'
 
-VERSION="1.0.1"
+VERSION="1.0.2"
 REPO_URL="https://raw.githubusercontent.com/luismiguelopes/mac-dev-up/main/mac-dev-up.sh"
 
 # -------------------- CONFIG DEFAULTS --------------------
@@ -24,6 +24,7 @@ DO_NPM=false
 DO_RUBY=false
 DO_MACOS=false
 DO_COMPOSER=false
+DO_RUST=false
 
 # -------------------- COLORS --------------------
 RED='\033[0;31m'
@@ -75,6 +76,7 @@ for arg in "$@"; do
     --ruby) DO_RUBY=true; RUN_ALL=false ;;
     --macos) DO_MACOS=true; RUN_ALL=false ;;
     --composer) DO_COMPOSER=true; RUN_ALL=false ;;
+    --rust) DO_RUST=true; RUN_ALL=false ;;
     --safe) MODE_SAFE=true ;;
     --full) MODE_SAFE=false ;;
     --fast) MODE_FAST=true ;;
@@ -90,6 +92,7 @@ for arg in "$@"; do
       echo "--ruby        Update Ruby gems"
       echo "--macos       Update macOS"
       echo "--composer    Update Composer"
+      echo "--rust        Update Rust toolchain"
       echo ""
       echo "--safe        Safe mode (default)"
       echo "--full        Aggressive updates"
@@ -173,7 +176,12 @@ update_python() {
   if ! command -v python3 >/dev/null; then return; fi
   
   PY_PATH=$(which python3)
-  if [[ "$PY_PATH" == "/usr/bin/"* ]] && [ "$MODE_SAFE" = true ]; then
+  
+  if command -v pyenv >/dev/null && [[ "$PY_PATH" == *"/pyenv/"* || "$PY_PATH" == *".pyenv"* ]]; then
+    log "Pyenv Python detected"
+  elif command -v asdf >/dev/null && [[ "$PY_PATH" == *"/asdf/"* || "$PY_PATH" == *".asdf"* ]]; then
+    log "ASDF Python detected"
+  elif [[ "$PY_PATH" == "/usr/bin/"* ]] && [ "$MODE_SAFE" = true ]; then
     warn "System Python detected. Skipping to avoid permission issues (Safe Mode)."
     return
   fi
@@ -183,33 +191,55 @@ update_python() {
 }
 
 update_npm() {
-  if ! command -v npm >/dev/null; then return; fi
-
-  PREFIX=$(npm config get prefix)
-  if [ "$MODE_SAFE" = true ]; then
-    warn "Skipping npm global updates (Safe Mode)."
-    return
+  # Node Version Managers - update npm itself
+  if [ -n "${NVM_DIR:-}" ] && [ -s "$NVM_DIR/nvm.sh" ]; then
+    log "NVM detected. Updating npm for current Node version"
+    run "source \"$NVM_DIR/nvm.sh\" && npm install -g npm"
+  elif command -v asdf >/dev/null && asdf current nodejs >/dev/null 2>&1; then
+    log "ASDF Node.js detected. Updating npm"
+    run "npm install -g npm"
   fi
 
-  if [[ "$PREFIX" == "/usr/local"* ]]; then
-    warn "npm global in system path. Might require sudo. Skipping for safety."
-    return
-  fi
+  # Package managers (npm/yarn/pnpm)
+  if command -v pnpm >/dev/null; then
+    log "pnpm global update"
+    run "pnpm update -g"
+  elif command -v yarn >/dev/null; then
+    log "yarn global update"
+    run "yarn global upgrade"
+  elif command -v npm >/dev/null; then
+    PREFIX=$(npm config get prefix)
+    
+    if [[ "$PREFIX" == "/usr/local"* ]] || [[ "$PREFIX" == "/usr/bin"* ]]; then
+      warn "npm global in system path. Might require sudo. Skipping for safety."
+      return
+    fi
+    
+    if [ "$MODE_SAFE" = true ] && [[ "$PREFIX" != *".nvm"* ]] && [[ "$PREFIX" != *".asdf"* ]]; then
+      warn "Skipping npm global packages update (Safe Mode)."
+      return
+    fi
 
-  log "npm global update"
-  run "npm update -g"
+    log "npm global update"
+    run "npm update -g"
+  fi
 }
 
 update_ruby() {
   if ! command -v gem >/dev/null; then return; fi
 
   GEM_PATH=$(which gem)
-  if [[ "$GEM_PATH" == "/usr/bin/"* ]]; then
+  
+  if command -v rbenv >/dev/null && [[ "$GEM_PATH" == *"/rbenv/"* || "$GEM_PATH" == *".rbenv"* ]]; then
+    log "Rbenv Ruby detected"
+  elif command -v asdf >/dev/null && [[ "$GEM_PATH" == *"/asdf/"* || "$GEM_PATH" == *".asdf"* ]]; then
+    log "ASDF Ruby detected"
+  elif [[ "$GEM_PATH" == "/usr/bin/"* ]]; then
     warn "System Ruby detected (SIP Protected). Skipping."
     return
   fi
 
-  if [ "$MODE_SAFE" = true ]; then
+  if [ "$MODE_SAFE" = true ] && [[ "$GEM_PATH" != *"/rbenv/"* ]] && [[ "$GEM_PATH" != *"/asdf/"* ]] && [[ "$GEM_PATH" != *".rbenv"* ]] && [[ "$GEM_PATH" != *".asdf"* ]]; then
     warn "Skipping Ruby gems (Safe Mode)."
     return
   fi
@@ -226,10 +256,16 @@ update_composer() {
   [ "$MODE_SAFE" = false ] && run "composer global update"
 }
 
+update_rust() {
+  if ! command -v rustup >/dev/null; then return; fi
+  log "Rustup toolchain update"
+  run "rustup update"
+}
+
 # -------------------- EXECUTION --------------------
 run_selected() {
   if [ "$RUN_ALL" = true ]; then
-    DO_BREW=true; DO_PYTHON=true; DO_NPM=true; DO_RUBY=true; DO_MACOS=true; DO_COMPOSER=true
+    DO_BREW=true; DO_PYTHON=true; DO_NPM=true; DO_RUBY=true; DO_MACOS=true; DO_COMPOSER=true; DO_RUST=true
   fi
 
   if [ "$MODE_FAST" = true ]; then
@@ -243,8 +279,9 @@ run_selected() {
     # Background tasks (safe to parallelize)
     [ "$DO_COMPOSER" = true ] && { log "Composer (bg)"; update_composer > "$TMP_DIR/composer.log" 2>&1; } &
     [ "$DO_PYTHON" = true ] && { log "Python (bg)"; update_python > "$TMP_DIR/python.log" 2>&1; } &
-    [ "$DO_NPM" = true ] && { log "npm (bg)"; update_npm > "$TMP_DIR/npm.log" 2>&1; } &
+    [ "$DO_NPM" = true ] && { log "Node tools (bg)"; update_npm > "$TMP_DIR/npm.log" 2>&1; } &
     [ "$DO_RUBY" = true ] && { log "Ruby (bg)"; update_ruby > "$TMP_DIR/ruby.log" 2>&1; } &
+    [ "$DO_RUST" = true ] && { log "Rust (bg)"; update_rust > "$TMP_DIR/rust.log" 2>&1; } &
     
     wait
     
@@ -263,6 +300,7 @@ run_selected() {
     [ "$DO_PYTHON" = true ] && update_python
     [ "$DO_NPM" = true ] && update_npm
     [ "$DO_RUBY" = true ] && update_ruby
+    [ "$DO_RUST" = true ] && update_rust
   fi
 }
 
