@@ -2,13 +2,13 @@
 
 # ==============================================================================
 # mac-dev-up: Safe macOS Dev Environment Updater
-# Version: 1.0.0
+# Version: 1.0.1
 # ==============================================================================
 
 set -euo pipefail
 IFS=$'\n\t'
 
-VERSION="1.0.0"
+VERSION="1.0.1"
 REPO_URL="https://raw.githubusercontent.com/luismiguelopes/mac-dev-up/main/mac-dev-up.sh"
 
 # -------------------- CONFIG DEFAULTS --------------------
@@ -105,8 +105,8 @@ done
 # -------------------- PRECHECK --------------------
 log "Pre-checks (v$VERSION)"
 
-# New Resilient Internet Check
-if ! curl -sfI https://www.google.com > /dev/null; then
+# Resilient Internet Check
+if ! curl -sfI https://1.1.1.1 > /dev/null && ! curl -sfI https://github.com > /dev/null; then
   error "No internet connection detected."
 fi
 
@@ -129,6 +129,8 @@ update_macos() {
 }
 
 update_brew() {
+  BREW_CMD="brew"
+
   if ! command -v brew >/dev/null; then
     warn "Homebrew not found."
     read -p "Do you want to install Homebrew? (y/n) " -n 1 -r
@@ -141,8 +143,10 @@ update_brew() {
       fi
       if [ -x "/opt/homebrew/bin/brew" ]; then
         eval "$(/opt/homebrew/bin/brew shellenv)"
+        BREW_CMD="/opt/homebrew/bin/brew"
       elif [ -x "/usr/local/bin/brew" ]; then
         eval "$(/usr/local/bin/brew shellenv)"
+        BREW_CMD="/usr/local/bin/brew"
       fi
     else
       warn "Skipping Homebrew update."
@@ -151,18 +155,18 @@ update_brew() {
   fi
 
   log "Homebrew update"
-  run "brew update"
-  run "brew upgrade"
+  run "$BREW_CMD update"
+  run "$BREW_CMD upgrade"
 
   if [ "$MODE_SAFE" = false ]; then
     log "Brew Casks (Aggressive)"
-    run "brew upgrade --cask --greedy || true"
+    run "$BREW_CMD upgrade --cask --greedy || true"
   else
     log "Brew Casks (Safe)"
-    run "brew upgrade --cask || true"
+    run "$BREW_CMD upgrade --cask || true"
   fi
 
-  run "brew cleanup"
+  run "$BREW_CMD cleanup"
 }
 
 update_python() {
@@ -229,14 +233,29 @@ run_selected() {
   fi
 
   if [ "$MODE_FAST" = true ]; then
-    warn "Fast mode enabled. Running independent tasks in parallel."
-    update_macos &
-    update_composer &
-    update_brew # Brew usually locks its own DB, better to run it in foreground or carefully
+    warn "Fast mode enabled. Grouping outputs and respecting system locks."
+    TMP_DIR=$(mktemp -d)
+    
+    # Foreground tasks (avoid input/lock collisions)
+    [ "$DO_MACOS" = true ] && update_macos
+    [ "$DO_BREW" = true ] && update_brew
+
+    # Background tasks (safe to parallelize)
+    [ "$DO_COMPOSER" = true ] && { log "Composer (bg)"; update_composer > "$TMP_DIR/composer.log" 2>&1; } &
+    [ "$DO_PYTHON" = true ] && { log "Python (bg)"; update_python > "$TMP_DIR/python.log" 2>&1; } &
+    [ "$DO_NPM" = true ] && { log "npm (bg)"; update_npm > "$TMP_DIR/npm.log" 2>&1; } &
+    [ "$DO_RUBY" = true ] && { log "Ruby (bg)"; update_ruby > "$TMP_DIR/ruby.log" 2>&1; } &
+    
     wait
-    update_python
-    update_npm
-    update_ruby
+    
+    # Print background logs
+    for f in "$TMP_DIR"/*.log; do
+      if [ -f "$f" ]; then
+        echo -e "\n${BLUE}=== $(basename "$f" .log) ===${NC}"
+        cat "$f"
+      fi
+    done
+    rm -rf "$TMP_DIR"
   else
     [ "$DO_MACOS" = true ] && update_macos
     [ "$DO_BREW" = true ] && update_brew
