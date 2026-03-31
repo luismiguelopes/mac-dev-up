@@ -2,13 +2,13 @@
 
 # ==============================================================================
 # mac-dev-up: Safe macOS Dev Environment Updater
-# Version: 1.0.2
+# Version: 1.0.3
 # ==============================================================================
 
 set -euo pipefail
 IFS=$'\n\t'
 
-VERSION="1.0.2"
+VERSION="1.0.3"
 REPO_URL="https://raw.githubusercontent.com/luismiguelopes/mac-dev-up/main/mac-dev-up.sh"
 
 # -------------------- CONFIG DEFAULTS --------------------
@@ -308,5 +308,12 @@ run_selected() {
 START=$(date +%s)
 run_selected
 END=$(date +%s)
+TOTAL_TIME=$((END - START))
+MINUTES=$((TOTAL_TIME / 60))
 
-success "Environment updated successfully in $((END - START))s"
+success "Environment updated successfully in ${TOTAL_TIME}s"
+
+# Display macOS visual notification when the script finishes
+if [ "$DRY_RUN" = false ]; then
+  osascript -e 'display notification "All updates completed successfully!" with title "mac-dev-up"'
+fi

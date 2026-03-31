@@ -12,6 +12,7 @@
 - **Sudo Heartbeat:** Pings `sudo` in the background so you only need to enter your password once at the start.
 - **Resilient Internet Check:** Validates internet connectivity before proceeding.
 - **Dry-run Mode:** Allows you to preview the commands that would be executed without modifying the system.
+- **macOS Visual Notifications:** Triggers a native system notification when the update process completes.
 
 ## 📦 Installation
 
