@@ -13,6 +13,7 @@
 - **Resilient Internet Check:** Validates internet connectivity before proceeding.
 - **Dry-run Mode:** Allows you to preview the commands that would be executed without modifying the system.
 - **macOS Visual Notifications:** Triggers a native system notification when the update process completes.
+- **Cron / LaunchAgent Maker:** Automatically generates and registers a native macOS `LaunchAgent` to run the script silently every Sunday at 10:00 AM.
 
 ## 📦 Installation
 
@@ -43,6 +44,7 @@ mac-dev-up [options]
 - `--macos`       Check and install macOS software updates.
 - `--composer`    Update Composer globally.
 - `--rust`        Update Rust toolchain via `rustup`.
+- `--install-cron` Generate a macOS `LaunchAgent` to securely map env and run `mac-dev-up` silently every Sunday at 10:00 AM.
 
 ### Execution Modes
 - `--safe`        Safe mode (default). Skips system directories to prevent breaking macOS.

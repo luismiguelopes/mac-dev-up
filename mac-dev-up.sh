@@ -2,20 +2,27 @@
 
 # ==============================================================================
 # mac-dev-up: Safe macOS Dev Environment Updater
-# Version: 1.0.3
+# Version: 1.0.4
 # ==============================================================================
 
 set -euo pipefail
 IFS=$'\n\t'
 
-VERSION="1.0.3"
+VERSION="1.0.4"
 REPO_URL="https://raw.githubusercontent.com/luismiguelopes/mac-dev-up/main/mac-dev-up.sh"
+
+# -------------------- ENVIRONMENT RECOVERY --------------------
+# Ensures tools like brew, nvm, and asdf are found when run via LaunchAgent.
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:$HOME/.asdf/shims:$HOME/.asdf/bin:$HOME/.pyenv/shims:$HOME/.pyenv/bin:$HOME/.rbenv/shims:$HOME/.rbenv/bin:$HOME/.cargo/bin:$PATH"
+[ -d "$HOME/.nvm" ] && export NVM_DIR="$HOME/.nvm"
 
 # -------------------- CONFIG DEFAULTS --------------------
 MODE_SAFE=true
 MODE_FAST=false
 DRY_RUN=false
 VERBOSE=false
+INSTALL_CRON=false
+IS_CRON_RUN=false
 
 RUN_ALL=true
 DO_BREW=false
@@ -49,6 +56,7 @@ run() {
 
 # -------------------- AUTO-UPDATE --------------------
 check_updates() {
+  if [ "$IS_CRON_RUN" = true ]; then return; fi
   log "Checking for script updates..."
   REMOTE_VERSION=$(curl -s "$REPO_URL" | grep "VERSION=" | head -1 | cut -d'"' -f2 || echo "$VERSION")
   
@@ -69,6 +77,8 @@ check_updates() {
 # -------------------- ARG PARSER --------------------
 for arg in "$@"; do
   case $arg in
+    --install-cron) INSTALL_CRON=true ;;
+    --cron) IS_CRON_RUN=true; RUN_ALL=true ;;
     --all) RUN_ALL=true ;;
     --brew) DO_BREW=true; RUN_ALL=false ;;
     --python) DO_PYTHON=true; RUN_ALL=false ;;
@@ -94,19 +104,74 @@ for arg in "$@"; do
       echo "--composer    Update Composer"
       echo "--rust        Update Rust toolchain"
       echo ""
-      echo "--safe        Safe mode (default)"
-      echo "--full        Aggressive updates"
-      echo "--fast        Parallel execution"
-      echo "--dry-run     Preview only"
-      echo "--verbose     Debug logs"
+      echo "--safe          Safe mode (default)"
+      echo "--full          Aggressive updates"
+      echo "--fast          Parallel execution"
+      echo "--dry-run       Preview only"
+      echo "--verbose       Debug logs"
+      echo "--install-cron  Install macOS LaunchAgent (Sundays 10:00 AM)"
       exit 0
       ;;
     *) error "Unknown option: $arg" ;;
   esac
 done
 
+# -------------------- CRON INSTALLER --------------------
+install_cron() {
+  log "Installing macOS LaunchAgent for automated weekly updates (Sun 10:00 AM)..."
+  
+  PLIST_DIR="$HOME/Library/LaunchAgents"
+  PLIST_FILE="$PLIST_DIR/com.luismiguelopes.mac-dev-up.plist"
+  SCRIPT_PATH=$(command -v mac-dev-up || echo "/usr/local/bin/mac-dev-up")
+  
+  mkdir -p "$PLIST_DIR"
+  
+  cat <<EOF > "$PLIST_FILE"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.luismiguelopes.mac-dev-up</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$SCRIPT_PATH</string>
+        <string>--cron</string>
+        <string>--fast</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>0</integer>
+        <key>Hour</key>
+        <integer>10</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
+EOF
+
+  launchctl unload "$PLIST_FILE" 2>/dev/null || true
+  launchctl load "$PLIST_FILE"
+  
+  success "LaunchAgent installed at $PLIST_FILE"
+  success "mac-dev-up will now run automatically in the background every Sunday at 10:00 AM."
+  exit 0
+}
+
+if [ "$INSTALL_CRON" = true ]; then
+  install_cron
+fi
+
 # -------------------- PRECHECK --------------------
-log "Pre-checks (v$VERSION)"
+if [ "$IS_CRON_RUN" = false ]; then
+  log "Pre-checks (v$VERSION)"
+else
+  log "Silent Cron Run (v$VERSION)"
+fi
 
 # Resilient Internet Check
 if ! curl -sfI https://1.1.1.1 > /dev/null && ! curl -sfI https://github.com > /dev/null; then
@@ -115,18 +180,24 @@ fi
 
 check_updates
 
-if ! sudo -v; then
-  error "Sudo permissions required to run updates."
-fi
+if [ "$IS_CRON_RUN" = false ]; then
+  if ! sudo -v; then
+    error "Sudo permissions required to run updates."
+  fi
 
-# Better Sudo Heartbeat
-( while true; do sudo -n true; sleep 60; done ) &
-SUDO_PID=$!
-trap 'kill $SUDO_PID 2>/dev/null' EXIT
+  # Better Sudo Heartbeat
+  ( while true; do sudo -n true; sleep 60; done ) &
+  SUDO_PID=$!
+  trap 'kill $SUDO_PID 2>/dev/null' EXIT
+fi
 
 # -------------------- MODULES --------------------
 
 update_macos() {
+  if [ "$IS_CRON_RUN" = true ]; then
+    warn "Skipping macOS update during silent cron run (requires sudo)."
+    return
+  fi
   log "macOS Software Update"
   run "sudo softwareupdate --install --all"
 }
@@ -253,7 +324,9 @@ update_composer() {
   if ! command -v composer >/dev/null; then return; fi
   log "Composer update"
   run "composer self-update"
-  [ "$MODE_SAFE" = false ] && run "composer global update"
+  if [ "$MODE_SAFE" = false ]; then
+    run "composer global update"
+  fi
 }
 
 update_rust() {
