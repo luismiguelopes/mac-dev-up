@@ -2,22 +2,23 @@
 
 `mac-dev-up` is a bash script designed to securely, quickly, and reliably keep your macOS development environment up to date.
 
-## 🚀 Features
+## Features
 
-- **Safe Mode by Default:** Avoids updates in system paths (System Python, System Ruby, global npm) to protect your OS. It smartly detects localized version managers (`NVM`, `ASDF`, `Pyenv`, `Rbenv`) and safely applies updates within them.
-- **Alternative Package Managers:** Natively detects and updates global packages via `pnpm` and `yarn` as an alternative to `npm`.
-- **Fast Mode (Parallel Execution):** Runs independent tasks concurrently to save time.
-- **Auto-Update:** Automatically checks for newer versions in the GitHub repository and updates itself.
-- **Smart Tool Installation:** Detects if essential tools (like Homebrew) are missing and offers to install them on the fly.
-- **Sudo Heartbeat:** Pings `sudo` in the background so you only need to enter your password once at the start.
-- **Resilient Internet Check:** Validates internet connectivity before proceeding.
-- **Dry-run Mode:** Allows you to preview the commands that would be executed without modifying the system.
-- **macOS Visual Notifications:** Triggers a native system notification when the update process completes.
-- **Cron / LaunchAgent Maker:** Automatically generates and registers a native macOS `LaunchAgent` to run the script silently every Sunday at 10:00 AM.
+- **Safe Mode by Default** — avoids updates in system paths (System Python, System Ruby, global npm) to protect your OS. Smartly detects version managers (`NVM`, `ASDF`, `Pyenv`, `Rbenv`) and safely applies updates within them.
+- **Alternative Package Managers** — natively detects and updates global packages via `pnpm` or `yarn` as an alternative to `npm`.
+- **Fast Mode (Parallel Execution)** — runs independent tasks concurrently, tracking each background job individually and reporting its exit code.
+- **Per-Module Run Summary** — prints a summary at the end of every run showing which modules succeeded, which failed, and how long each one took.
+- **Config File Support** — persist your preferences in `~/.mac-dev-up.conf` without passing flags every time.
+- **Selective Exclusion** — skip specific modules with `--exclude` even when running `--all`.
+- **Verified Auto-Update** — checks for newer versions and verifies the download against a SHA-256 checksum before installing.
+- **Smart Tool Installation** — detects if Homebrew is missing and offers to install it on the fly.
+- **Sudo Heartbeat** — refreshes `sudo` in the background so you only need to enter your password once.
+- **Resilient Internet Check** — validates connectivity before proceeding.
+- **Dry-Run Mode** — preview every command that would be executed without touching the system.
+- **macOS Native Notifications** — triggers a system notification when the update process completes.
+- **LaunchAgent Installer** — generates and registers a native macOS `LaunchAgent` that runs the script silently every Sunday at 10:00 AM, with full output logging.
 
-## 📦 Installation
-
-You can install or update the script by downloading it directly from the repository:
+## Installation
 
 ```bash
 curl -O https://raw.githubusercontent.com/luismiguelopes/mac-dev-up/main/mac-dev-up.sh
@@ -25,34 +26,102 @@ chmod +x mac-dev-up.sh
 sudo mv mac-dev-up.sh /usr/local/bin/mac-dev-up
 ```
 
-
-
-## 🛠 Usage
-
-Run the script in your terminal:
+## Usage
 
 ```bash
 mac-dev-up [options]
 ```
 
-### Update Options
-- `--all`         Run all supported updates (default behavior).
-- `--brew`        Update Homebrew packages and casks.
-- `--python`      Update Python packages (pip, setuptools, wheel).
-- `--npm`         Update global npm packages (automatically falls back to `pnpm` or `yarn` if detected).
-- `--ruby`        Update RubyGems (respects `Rbenv` and `ASDF`).
-- `--macos`       Check and install macOS software updates.
-- `--composer`    Update Composer globally.
-- `--rust`        Update Rust toolchain via `rustup`.
-- `--install-cron` Generate a macOS `LaunchAgent` to securely map env and run `mac-dev-up` silently every Sunday at 10:00 AM.
+### Update Targets
+
+| Flag | Description |
+|---|---|
+| `--all` | Run all supported updates (default) |
+| `--brew` | Update Homebrew packages and casks |
+| `--python` | Update pip, setuptools, and wheel |
+| `--npm` | Update global Node packages (falls back to `pnpm` or `yarn` if detected) |
+| `--ruby` | Update RubyGems (respects `Rbenv` and `ASDF`) |
+| `--macos` | Check and install macOS software updates |
+| `--composer` | Update Composer and global packages |
+| `--rust` | Update Rust toolchain via `rustup` |
+| `--exclude=LIST` | Skip specific modules, comma-separated (e.g. `--exclude=macos,ruby`) |
 
 ### Execution Modes
-- `--safe`        Safe mode (default). Skips system directories to prevent breaking macOS.
-- `--full`        Aggressive updates (e.g., uses `--greedy` flag in brew to catch tools like Google Chrome which self-update).
-- `--fast`        Parallel execution for independent tasks.
-- `--dry-run`     Preview mode (only shows what would be executed).
-- `--verbose`     Displays detailed logs for debugging.
 
-## 📝 License
+| Flag | Description |
+|---|---|
+| `--safe` | Safe mode (default) — skips system directories to prevent breaking macOS |
+| `--full` | Aggressive updates — uses `--greedy` in brew to also catch self-updating apps like Chrome |
+| `--fast` | Parallel execution for independent tasks |
+| `--dry-run` | Preview mode — shows what would run without making any changes |
+| `--verbose` | Detailed logs for debugging |
+| `--install-cron` | Install a macOS `LaunchAgent` to run `mac-dev-up` silently every Sunday at 10:00 AM |
+
+### Run Summary
+
+At the end of every run, a per-module summary is printed:
+
+```
+== Run Summary ==
+✔  brew     — 38s
+✔  python   — 6s
+⚠  npm      — FAILED (4s)
+✔  rust     — 12s
+```
+
+## Config File
+
+Create `~/.mac-dev-up.conf` to persist your preferences. CLI flags always take precedence.
+
+```ini
+# ~/.mac-dev-up.conf
+MODE    = full
+FAST    = true
+EXCLUDE = macos, ruby
+```
+
+| Key | Values | Description |
+|---|---|---|
+| `MODE` | `safe` \| `full` | Sets the update mode |
+| `FAST` | `true` \| `false` | Enables parallel execution |
+| `EXCLUDE` | comma-separated module names | Modules to skip on every run |
+
+## Automated Weekly Updates
+
+Run once to install a native macOS LaunchAgent that executes `mac-dev-up` every Sunday at 10:00 AM:
+
+```bash
+mac-dev-up --install-cron
+```
+
+Logs are written to `~/Library/Logs/mac-dev-up/`:
+
+```
+~/Library/Logs/mac-dev-up/run.log   # standard output
+~/Library/Logs/mac-dev-up/run.err   # standard error
+```
+
+## Integrity Verification
+
+Each release ships a `mac-dev-up.sh.sha256` checksum file. The auto-update mechanism verifies it automatically. To verify manually:
+
+```bash
+curl -O https://raw.githubusercontent.com/luismiguelopes/mac-dev-up/main/mac-dev-up.sh.sha256
+shasum -a 256 -c mac-dev-up.sh.sha256
+```
+
+## Supported Toolchains
+
+| Tool | Version Manager Support |
+|---|---|
+| Homebrew | — |
+| Python / pip | `pyenv`, `asdf`, system (safe mode skips) |
+| Node.js / npm | `nvm`, `asdf`, `pnpm`, `yarn` |
+| Ruby / gems | `rbenv`, `asdf`, system (SIP-protected, always skipped) |
+| Rust | `rustup` |
+| PHP / Composer | — |
+| macOS | `softwareupdate` |
+
+## License
 
 Distributed under the MIT License. See the [LICENSE](LICENSE) file for more details.
