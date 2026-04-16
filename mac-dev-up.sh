@@ -2,14 +2,15 @@
 
 # ==============================================================================
 # mac-dev-up: Safe macOS Dev Environment Updater
-# Version: 1.0.4
+# Version: 1.0.5
 # ==============================================================================
 
 set -euo pipefail
 IFS=$'\n\t'
 
-VERSION="1.0.4"
+VERSION="1.0.5"
 REPO_URL="https://raw.githubusercontent.com/luismiguelopes/mac-dev-up/main/mac-dev-up.sh"
+CHECKSUM_URL="https://raw.githubusercontent.com/luismiguelopes/mac-dev-up/main/mac-dev-up.sh.sha256"
 
 # -------------------- ENVIRONMENT RECOVERY --------------------
 # Ensures tools like brew, nvm, and asdf are found when run via LaunchAgent.
@@ -23,6 +24,7 @@ DRY_RUN=false
 VERBOSE=false
 INSTALL_CRON=false
 IS_CRON_RUN=false
+EXCLUDE_LIST=""
 
 RUN_ALL=true
 DO_BREW=false
@@ -40,17 +42,102 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-log() { echo -e "${BLUE}== $* ==${NC}"; }
+log()     { echo -e "${BLUE}== $* ==${NC}"; }
 success() { echo -e "${GREEN}✔ $*${NC}"; }
-warn() { echo -e "${YELLOW}⚠ $*${NC}"; }
-error() { echo -e "${RED}✖ $*${NC}"; exit 1; }
+warn()    { echo -e "${YELLOW}⚠ $*${NC}"; }
+error()   { echo -e "${RED}✖ $*${NC}"; exit 1; }
 
+# Uses bash -c in an isolated subshell instead of eval to avoid double-expansion
+# and limit the blast radius of any unexpected input.
 run() {
   if [ "$DRY_RUN" = true ]; then
     echo "[DRY-RUN] $*"
   else
     [ "$VERBOSE" = true ] && echo "[RUN] $*"
-    eval "$@"
+    bash -c "$*"
+  fi
+}
+
+# -------------------- CONFIG FILE --------------------
+# Reads ~/.mac-dev-up.conf and applies settings as defaults.
+# Command-line arguments (parsed after this) always take precedence.
+# Supported keys: MODE (safe|full), FAST (true|false), EXCLUDE (comma-separated modules)
+load_config() {
+  local config_file="$HOME/.mac-dev-up.conf"
+  [ -f "$config_file" ] || return 0
+
+  log "Loading config from $config_file"
+  while IFS='=' read -r key value; do
+    # Skip comments and blank lines
+    [[ "$key" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "${key//[[:space:]]/}" ]] && continue
+    key="${key//[[:space:]]/}"
+    value="${value//[[:space:]]/}"
+    case "$key" in
+      MODE)
+        [[ "$value" == "safe" ]] && MODE_SAFE=true
+        [[ "$value" == "full" ]] && MODE_SAFE=false
+        ;;
+      FAST)
+        [[ "$value" == "true" ]] && MODE_FAST=true
+        ;;
+      EXCLUDE)
+        EXCLUDE_LIST="$value"
+        ;;
+    esac
+  done < "$config_file"
+}
+
+# -------------------- EXCLUDE HELPER --------------------
+is_excluded() {
+  local module="$1" item
+  local IFS=','
+  for item in $EXCLUDE_LIST; do
+    item="${item//[[:space:]]/}"
+    [ "$item" = "$module" ] && return 0
+  done
+  return 1
+}
+
+# -------------------- SUMMARY TRACKING --------------------
+# Uses a pipe-delimited string for bash 3.2 compatibility (no associative arrays).
+SUMMARY_ITEMS=""
+
+record_result() {
+  local name="$1" status="$2" elapsed="$3"
+  SUMMARY_ITEMS="${SUMMARY_ITEMS}|${name}:${status}:${elapsed}"
+}
+
+print_summary() {
+  echo ""
+  log "Run Summary"
+  local IFS='|' item name rest status elapsed
+  for item in $SUMMARY_ITEMS; do
+    [ -z "$item" ] && continue
+    name="${item%%:*}"
+    rest="${item#*:}"
+    status="${rest%%:*}"
+    elapsed="${rest#*:}"
+    if [ "$status" = "ok" ]; then
+      success "  $name — ${elapsed}"
+    else
+      warn "  $name — FAILED (${elapsed})"
+    fi
+  done
+}
+
+# Wraps a module function to track its success/failure and elapsed time.
+# Safe under set -e because the module call is inside an if-condition.
+run_module() {
+  local name="$1" func="$2" start elapsed
+  start=$(date +%s)
+  if "$func"; then
+    elapsed=$(( $(date +%s) - start ))
+    record_result "$name" "ok" "${elapsed}s"
+  else
+    elapsed=$(( $(date +%s) - start ))
+    record_result "$name" "failed" "${elapsed}s"
+    warn "Module '$name' encountered errors — continuing."
   fi
 }
 
@@ -58,15 +145,51 @@ run() {
 check_updates() {
   if [ "$IS_CRON_RUN" = true ]; then return; fi
   log "Checking for script updates..."
-  REMOTE_VERSION=$(curl -s "$REPO_URL" | grep "VERSION=" | head -1 | cut -d'"' -f2 || echo "$VERSION")
-  
-  if [ "$REMOTE_VERSION" != "$VERSION" ] && [ "$REMOTE_VERSION" != "" ]; then
-    warn "New version available: $REMOTE_VERSION (Current: $VERSION)"
+
+  local remote_version
+  remote_version=$(curl -sf "$REPO_URL" | grep '^VERSION=' | head -1 | cut -d'"' -f2 || echo "$VERSION")
+
+  if [ "$remote_version" != "$VERSION" ] && [ -n "$remote_version" ]; then
+    warn "New version available: $remote_version (Current: $VERSION)"
     read -p "Do you want to update mac-dev-up? (y/n) " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-      sudo curl -L "$REPO_URL" -o "$(which mac-dev-up)"
-      success "Updated to $REMOTE_VERSION! Please restart the script."
+      local tmp_script tmp_checksum install_path
+      tmp_script=$(mktemp)
+      tmp_checksum=$(mktemp)
+
+      log "Downloading new version..."
+      if ! curl -sfL "$REPO_URL" -o "$tmp_script"; then
+        warn "Download failed. Aborting update."
+        rm -f "$tmp_script" "$tmp_checksum"
+        return
+      fi
+
+      # Integrity check: verify SHA-256 against published checksum file.
+      # To publish: run `shasum -a 256 mac-dev-up.sh > mac-dev-up.sh.sha256` and commit it.
+      log "Verifying integrity..."
+      if curl -sfL "$CHECKSUM_URL" -o "$tmp_checksum" 2>/dev/null; then
+        local expected actual
+        expected=$(awk '{print $1}' "$tmp_checksum")
+        actual=$(shasum -a 256 "$tmp_script" | awk '{print $1}')
+        if [ "$expected" != "$actual" ]; then
+          warn "Checksum mismatch — aborting update for safety."
+          warn "  expected: $expected"
+          warn "  got:      $actual"
+          rm -f "$tmp_script" "$tmp_checksum"
+          return
+        fi
+        success "Integrity verified."
+      else
+        warn "Checksum file not found at remote — skipping integrity check."
+      fi
+
+      install_path=$(command -v mac-dev-up || echo "/usr/local/bin/mac-dev-up")
+      sudo cp "$tmp_script" "$install_path"
+      sudo chmod +x "$install_path"
+      rm -f "$tmp_script" "$tmp_checksum"
+
+      success "Updated to $remote_version! Please restart the script."
       exit 0
     fi
   else
@@ -74,42 +197,54 @@ check_updates() {
   fi
 }
 
-# -------------------- ARG PARSER --------------------
+# -------------------- CONFIG + ARG PARSER --------------------
+# Load config first so command-line flags can override it.
+load_config
+
 for arg in "$@"; do
   case $arg in
     --install-cron) INSTALL_CRON=true ;;
-    --cron) IS_CRON_RUN=true; RUN_ALL=true ;;
-    --all) RUN_ALL=true ;;
-    --brew) DO_BREW=true; RUN_ALL=false ;;
-    --python) DO_PYTHON=true; RUN_ALL=false ;;
-    --npm) DO_NPM=true; RUN_ALL=false ;;
-    --ruby) DO_RUBY=true; RUN_ALL=false ;;
-    --macos) DO_MACOS=true; RUN_ALL=false ;;
-    --composer) DO_COMPOSER=true; RUN_ALL=false ;;
-    --rust) DO_RUST=true; RUN_ALL=false ;;
-    --safe) MODE_SAFE=true ;;
-    --full) MODE_SAFE=false ;;
-    --fast) MODE_FAST=true ;;
-    --dry-run) DRY_RUN=true ;;
-    --verbose) VERBOSE=true ;;
+    --cron)         IS_CRON_RUN=true; RUN_ALL=true ;;
+    --all)          RUN_ALL=true ;;
+    --brew)         DO_BREW=true;     RUN_ALL=false ;;
+    --python)       DO_PYTHON=true;   RUN_ALL=false ;;
+    --npm)          DO_NPM=true;      RUN_ALL=false ;;
+    --ruby)         DO_RUBY=true;     RUN_ALL=false ;;
+    --macos)        DO_MACOS=true;    RUN_ALL=false ;;
+    --composer)     DO_COMPOSER=true; RUN_ALL=false ;;
+    --rust)         DO_RUST=true;     RUN_ALL=false ;;
+    --safe)         MODE_SAFE=true ;;
+    --full)         MODE_SAFE=false ;;
+    --fast)         MODE_FAST=true ;;
+    --dry-run)      DRY_RUN=true ;;
+    --verbose)      VERBOSE=true ;;
+    --exclude=*)    EXCLUDE_LIST="${arg#--exclude=}" ;;
     --help)
       echo "Usage: mac-dev-up [options]"
       echo ""
-      echo "--all         Run all updates (default)"
-      echo "--brew        Update Homebrew"
-      echo "--python      Update Python packages"
-      echo "--npm         Update npm global"
-      echo "--ruby        Update Ruby gems"
-      echo "--macos       Update macOS"
-      echo "--composer    Update Composer"
-      echo "--rust        Update Rust toolchain"
+      echo "Update targets:"
+      echo "  --all              Run all updates (default)"
+      echo "  --brew             Update Homebrew"
+      echo "  --python           Update Python packages"
+      echo "  --npm              Update npm global"
+      echo "  --ruby             Update Ruby gems"
+      echo "  --macos            Update macOS"
+      echo "  --composer         Update Composer"
+      echo "  --rust             Update Rust toolchain"
+      echo "  --exclude=LIST     Skip modules (comma-separated, e.g. --exclude=macos,ruby)"
       echo ""
-      echo "--safe          Safe mode (default)"
-      echo "--full          Aggressive updates"
-      echo "--fast          Parallel execution"
-      echo "--dry-run       Preview only"
-      echo "--verbose       Debug logs"
-      echo "--install-cron  Install macOS LaunchAgent (Sundays 10:00 AM)"
+      echo "Execution modes:"
+      echo "  --safe             Safe mode (default)"
+      echo "  --full             Aggressive updates"
+      echo "  --fast             Parallel execution"
+      echo "  --dry-run          Preview only"
+      echo "  --verbose          Debug logs"
+      echo "  --install-cron     Install macOS LaunchAgent (Sundays 10:00 AM)"
+      echo ""
+      echo "Config file: ~/.mac-dev-up.conf"
+      echo "  MODE=safe|full"
+      echo "  FAST=true|false"
+      echo "  EXCLUDE=module1,module2"
       exit 0
       ;;
     *) error "Unknown option: $arg" ;;
@@ -119,14 +254,16 @@ done
 # -------------------- CRON INSTALLER --------------------
 install_cron() {
   log "Installing macOS LaunchAgent for automated weekly updates (Sun 10:00 AM)..."
-  
-  PLIST_DIR="$HOME/Library/LaunchAgents"
-  PLIST_FILE="$PLIST_DIR/com.luismiguelopes.mac-dev-up.plist"
-  SCRIPT_PATH=$(command -v mac-dev-up || echo "/usr/local/bin/mac-dev-up")
-  
-  mkdir -p "$PLIST_DIR"
-  
-  cat <<EOF > "$PLIST_FILE"
+
+  local plist_dir="$HOME/Library/LaunchAgents"
+  local plist_file="$plist_dir/com.luismiguelopes.mac-dev-up.plist"
+  local script_path log_dir
+  script_path=$(command -v mac-dev-up || echo "/usr/local/bin/mac-dev-up")
+  log_dir="$HOME/Library/Logs/mac-dev-up"
+
+  mkdir -p "$plist_dir" "$log_dir"
+
+  cat <<EOF > "$plist_file"
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -135,7 +272,7 @@ install_cron() {
     <string>com.luismiguelopes.mac-dev-up</string>
     <key>ProgramArguments</key>
     <array>
-        <string>$SCRIPT_PATH</string>
+        <string>$script_path</string>
         <string>--cron</string>
         <string>--fast</string>
     </array>
@@ -150,15 +287,20 @@ install_cron() {
     </dict>
     <key>RunAtLoad</key>
     <false/>
+    <key>StandardOutPath</key>
+    <string>$log_dir/run.log</string>
+    <key>StandardErrorPath</key>
+    <string>$log_dir/run.err</string>
 </dict>
 </plist>
 EOF
 
-  launchctl unload "$PLIST_FILE" 2>/dev/null || true
-  launchctl load "$PLIST_FILE"
-  
-  success "LaunchAgent installed at $PLIST_FILE"
-  success "mac-dev-up will now run automatically in the background every Sunday at 10:00 AM."
+  launchctl unload "$plist_file" 2>/dev/null || true
+  launchctl load "$plist_file"
+
+  success "LaunchAgent installed at $plist_file"
+  success "Cron logs will be written to $log_dir/"
+  success "mac-dev-up will now run automatically every Sunday at 10:00 AM."
   exit 0
 }
 
@@ -185,7 +327,7 @@ if [ "$IS_CRON_RUN" = false ]; then
     error "Sudo permissions required to run updates."
   fi
 
-  # Better Sudo Heartbeat
+  # Sudo Heartbeat — refresh sudo token in the background so it never expires mid-run.
   ( while true; do sudo -n true; sleep 60; done ) &
   SUDO_PID=$!
   trap 'kill $SUDO_PID 2>/dev/null' EXIT
@@ -203,7 +345,7 @@ update_macos() {
 }
 
 update_brew() {
-  BREW_CMD="brew"
+  local brew_cmd="brew"
 
   if ! command -v brew >/dev/null; then
     warn "Homebrew not found."
@@ -212,15 +354,13 @@ update_brew() {
     if [[ $REPLY =~ ^[Yy]$ ]]; then
       log "Installing Homebrew..."
       run '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
-      if [ "$DRY_RUN" = true ]; then
-        return
-      fi
+      if [ "$DRY_RUN" = true ]; then return; fi
       if [ -x "/opt/homebrew/bin/brew" ]; then
         eval "$(/opt/homebrew/bin/brew shellenv)"
-        BREW_CMD="/opt/homebrew/bin/brew"
+        brew_cmd="/opt/homebrew/bin/brew"
       elif [ -x "/usr/local/bin/brew" ]; then
         eval "$(/usr/local/bin/brew shellenv)"
-        BREW_CMD="/usr/local/bin/brew"
+        brew_cmd="/usr/local/bin/brew"
       fi
     else
       warn "Skipping Homebrew update."
@@ -229,30 +369,31 @@ update_brew() {
   fi
 
   log "Homebrew update"
-  run "$BREW_CMD update"
-  run "$BREW_CMD upgrade"
+  run "$brew_cmd update"
+  run "$brew_cmd upgrade"
 
   if [ "$MODE_SAFE" = false ]; then
     log "Brew Casks (Aggressive)"
-    run "$BREW_CMD upgrade --cask --greedy || true"
+    run "$brew_cmd upgrade --cask --greedy || true"
   else
     log "Brew Casks (Safe)"
-    run "$BREW_CMD upgrade --cask || true"
+    run "$brew_cmd upgrade --cask || true"
   fi
 
-  run "$BREW_CMD cleanup"
+  run "$brew_cmd cleanup"
 }
 
 update_python() {
   if ! command -v python3 >/dev/null; then return; fi
-  
-  PY_PATH=$(which python3)
-  
-  if command -v pyenv >/dev/null && [[ "$PY_PATH" == *"/pyenv/"* || "$PY_PATH" == *".pyenv"* ]]; then
+
+  local py_path
+  py_path=$(which python3)
+
+  if command -v pyenv >/dev/null && [[ "$py_path" == *"/pyenv/"* || "$py_path" == *".pyenv"* ]]; then
     log "Pyenv Python detected"
-  elif command -v asdf >/dev/null && [[ "$PY_PATH" == *"/asdf/"* || "$PY_PATH" == *".asdf"* ]]; then
+  elif command -v asdf >/dev/null && [[ "$py_path" == *"/asdf/"* || "$py_path" == *".asdf"* ]]; then
     log "ASDF Python detected"
-  elif [[ "$PY_PATH" == "/usr/bin/"* ]] && [ "$MODE_SAFE" = true ]; then
+  elif [[ "$py_path" == "/usr/bin/"* ]] && [ "$MODE_SAFE" = true ]; then
     warn "System Python detected. Skipping to avoid permission issues (Safe Mode)."
     return
   fi
@@ -262,7 +403,7 @@ update_python() {
 }
 
 update_npm() {
-  # Node Version Managers - update npm itself
+  # Node Version Managers — update npm itself first
   if [ -n "${NVM_DIR:-}" ] && [ -s "$NVM_DIR/nvm.sh" ]; then
     log "NVM detected. Updating npm for current Node version"
     run "source \"$NVM_DIR/nvm.sh\" && npm install -g npm"
@@ -271,7 +412,7 @@ update_npm() {
     run "npm install -g npm"
   fi
 
-  # Package managers (npm/yarn/pnpm)
+  # Package managers (pnpm > yarn > npm)
   if command -v pnpm >/dev/null; then
     log "pnpm global update"
     run "pnpm update -g"
@@ -279,14 +420,15 @@ update_npm() {
     log "yarn global update"
     run "yarn global upgrade"
   elif command -v npm >/dev/null; then
-    PREFIX=$(npm config get prefix)
-    
-    if [[ "$PREFIX" == "/usr/local"* ]] || [[ "$PREFIX" == "/usr/bin"* ]]; then
-      warn "npm global in system path. Might require sudo. Skipping for safety."
+    local prefix
+    prefix=$(npm config get prefix)
+
+    if [[ "$prefix" == "/usr/local"* ]] || [[ "$prefix" == "/usr/bin"* ]]; then
+      warn "npm global prefix is a system path. Skipping for safety."
       return
     fi
-    
-    if [ "$MODE_SAFE" = true ] && [[ "$PREFIX" != *".nvm"* ]] && [[ "$PREFIX" != *".asdf"* ]]; then
+
+    if [ "$MODE_SAFE" = true ] && [[ "$prefix" != *".nvm"* ]] && [[ "$prefix" != *".asdf"* ]]; then
       warn "Skipping npm global packages update (Safe Mode)."
       return
     fi
@@ -299,18 +441,21 @@ update_npm() {
 update_ruby() {
   if ! command -v gem >/dev/null; then return; fi
 
-  GEM_PATH=$(which gem)
-  
-  if command -v rbenv >/dev/null && [[ "$GEM_PATH" == *"/rbenv/"* || "$GEM_PATH" == *".rbenv"* ]]; then
+  local gem_path
+  gem_path=$(which gem)
+
+  if command -v rbenv >/dev/null && [[ "$gem_path" == *"/rbenv/"* || "$gem_path" == *".rbenv"* ]]; then
     log "Rbenv Ruby detected"
-  elif command -v asdf >/dev/null && [[ "$GEM_PATH" == *"/asdf/"* || "$GEM_PATH" == *".asdf"* ]]; then
+  elif command -v asdf >/dev/null && [[ "$gem_path" == *"/asdf/"* || "$gem_path" == *".asdf"* ]]; then
     log "ASDF Ruby detected"
-  elif [[ "$GEM_PATH" == "/usr/bin/"* ]]; then
+  elif [[ "$gem_path" == "/usr/bin/"* ]]; then
     warn "System Ruby detected (SIP Protected). Skipping."
     return
   fi
 
-  if [ "$MODE_SAFE" = true ] && [[ "$GEM_PATH" != *"/rbenv/"* ]] && [[ "$GEM_PATH" != *"/asdf/"* ]] && [[ "$GEM_PATH" != *".rbenv"* ]] && [[ "$GEM_PATH" != *".asdf"* ]]; then
+  if [ "$MODE_SAFE" = true ] && \
+     [[ "$gem_path" != *"/rbenv/"* ]] && [[ "$gem_path" != *"/asdf/"* ]] && \
+     [[ "$gem_path" != *".rbenv"* ]] && [[ "$gem_path" != *".asdf"* ]]; then
     warn "Skipping Ruby gems (Safe Mode)."
     return
   fi
@@ -338,55 +483,66 @@ update_rust() {
 # -------------------- EXECUTION --------------------
 run_selected() {
   if [ "$RUN_ALL" = true ]; then
-    DO_BREW=true; DO_PYTHON=true; DO_NPM=true; DO_RUBY=true; DO_MACOS=true; DO_COMPOSER=true; DO_RUST=true
+    DO_BREW=true; DO_PYTHON=true; DO_NPM=true; DO_RUBY=true
+    DO_MACOS=true; DO_COMPOSER=true; DO_RUST=true
   fi
 
   if [ "$MODE_FAST" = true ]; then
-    warn "Fast mode enabled. Grouping outputs and respecting system locks."
-    TMP_DIR=$(mktemp -d)
-    
-    # Foreground tasks (avoid input/lock collisions)
-    [ "$DO_MACOS" = true ] && update_macos
-    [ "$DO_BREW" = true ] && update_brew
+    warn "Fast mode enabled. Foreground: macos, brew. Background: everything else."
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
 
-    # Background tasks (safe to parallelize)
-    [ "$DO_COMPOSER" = true ] && { log "Composer (bg)"; update_composer > "$TMP_DIR/composer.log" 2>&1; } &
-    [ "$DO_PYTHON" = true ] && { log "Python (bg)"; update_python > "$TMP_DIR/python.log" 2>&1; } &
-    [ "$DO_NPM" = true ] && { log "Node tools (bg)"; update_npm > "$TMP_DIR/npm.log" 2>&1; } &
-    [ "$DO_RUBY" = true ] && { log "Ruby (bg)"; update_ruby > "$TMP_DIR/ruby.log" 2>&1; } &
-    [ "$DO_RUST" = true ] && { log "Rust (bg)"; update_rust > "$TMP_DIR/rust.log" 2>&1; } &
-    
-    wait
-    
-    # Print background logs
-    for f in "$TMP_DIR"/*.log; do
-      if [ -f "$f" ]; then
-        echo -e "\n${BLUE}=== $(basename "$f" .log) ===${NC}"
-        cat "$f"
-      fi
+    # Foreground — must run sequentially (sudo, brew locks)
+    [ "$DO_MACOS" = true ]    && ! is_excluded "macos" && run_module "macos" update_macos
+    [ "$DO_BREW"  = true ]    && ! is_excluded "brew"  && run_module "brew"  update_brew
+
+    # Background — safe to parallelise; collect PIDs to check exit codes individually
+    local bg_pids=() bg_names=()
+    if [ "$DO_COMPOSER" = true ] && ! is_excluded "composer"; then
+      update_composer > "$tmp_dir/composer.log" 2>&1 & bg_pids+=($!); bg_names+=("composer")
+    fi
+    if [ "$DO_PYTHON" = true ] && ! is_excluded "python"; then
+      update_python   > "$tmp_dir/python.log"   2>&1 & bg_pids+=($!); bg_names+=("python")
+    fi
+    if [ "$DO_NPM" = true ] && ! is_excluded "npm"; then
+      update_npm      > "$tmp_dir/npm.log"      2>&1 & bg_pids+=($!); bg_names+=("npm")
+    fi
+    if [ "$DO_RUBY" = true ] && ! is_excluded "ruby"; then
+      update_ruby     > "$tmp_dir/ruby.log"     2>&1 & bg_pids+=($!); bg_names+=("ruby")
+    fi
+    if [ "$DO_RUST" = true ] && ! is_excluded "rust"; then
+      update_rust     > "$tmp_dir/rust.log"     2>&1 & bg_pids+=($!); bg_names+=("rust")
+    fi
+
+    # Collect results and print logs in launch order
+    local i
+    for i in "${!bg_pids[@]}"; do
+      local name="${bg_names[$i]}" status="ok"
+      wait "${bg_pids[$i]}" || status="failed"
+      record_result "$name" "$status" "bg"
+      echo -e "\n${BLUE}=== $name ===${NC}"
+      cat "$tmp_dir/${name}.log" 2>/dev/null || true
     done
-    rm -rf "$TMP_DIR"
+    rm -rf "$tmp_dir"
   else
-    [ "$DO_MACOS" = true ] && update_macos
-    [ "$DO_BREW" = true ] && update_brew
-    [ "$DO_COMPOSER" = true ] && update_composer
-    [ "$DO_PYTHON" = true ] && update_python
-    [ "$DO_NPM" = true ] && update_npm
-    [ "$DO_RUBY" = true ] && update_ruby
-    [ "$DO_RUST" = true ] && update_rust
+    [ "$DO_MACOS" = true ]    && ! is_excluded "macos"    && run_module "macos"    update_macos
+    [ "$DO_BREW" = true ]     && ! is_excluded "brew"     && run_module "brew"     update_brew
+    [ "$DO_COMPOSER" = true ] && ! is_excluded "composer" && run_module "composer" update_composer
+    [ "$DO_PYTHON" = true ]   && ! is_excluded "python"   && run_module "python"   update_python
+    [ "$DO_NPM" = true ]      && ! is_excluded "npm"      && run_module "npm"      update_npm
+    [ "$DO_RUBY" = true ]     && ! is_excluded "ruby"     && run_module "ruby"     update_ruby
+    [ "$DO_RUST" = true ]     && ! is_excluded "rust"     && run_module "rust"     update_rust
   fi
 }
 
 # -------------------- RUN --------------------
 START=$(date +%s)
 run_selected
-END=$(date +%s)
-TOTAL_TIME=$((END - START))
-MINUTES=$((TOTAL_TIME / 60))
+TOTAL=$(( $(date +%s) - START ))
 
-success "Environment updated successfully in ${TOTAL_TIME}s"
+print_summary
+success "Environment updated in ${TOTAL}s"
 
-# Display macOS visual notification when the script finishes
 if [ "$DRY_RUN" = false ]; then
   osascript -e 'display notification "All updates completed successfully!" with title "mac-dev-up"'
 fi
