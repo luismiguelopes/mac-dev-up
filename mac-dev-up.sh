@@ -2,13 +2,13 @@
 
 # ==============================================================================
 # mac-dev-up: Safe macOS Dev Environment Updater
-# Version: 1.0.5
+# Version: 1.0.6
 # ==============================================================================
 
 set -euo pipefail
 IFS=$'\n\t'
 
-VERSION="1.0.5"
+VERSION="1.0.6"
 REPO_URL="https://raw.githubusercontent.com/luismiguelopes/mac-dev-up/main/mac-dev-up.sh"
 CHECKSUM_URL="https://raw.githubusercontent.com/luismiguelopes/mac-dev-up/main/mac-dev-up.sh.sha256"
 
@@ -395,6 +395,18 @@ update_python() {
     log "ASDF Python detected"
   elif [[ "$py_path" == "/usr/bin/"* ]] && [ "$MODE_SAFE" = true ]; then
     warn "System Python detected. Skipping to avoid permission issues (Safe Mode)."
+    return
+  elif [[ "$py_path" == *"/homebrew/"* || "$py_path" == *"/Homebrew/"* || "$py_path" == "/usr/local/bin/python3" ]]; then
+    log "Homebrew Python detected — managed by Homebrew (PEP 668). Skipping pip upgrade."
+    warn "To update Python itself, run: brew upgrade python"
+    return
+  fi
+
+  # Guard against any other externally-managed environment (PEP 668)
+  local py_prefix
+  py_prefix=$(python3 -c "import sys; print(sys.prefix)" 2>/dev/null || true)
+  if [ -f "${py_prefix}/EXTERNALLY-MANAGED" ]; then
+    warn "Python environment is externally managed (PEP 668). Skipping pip upgrade."
     return
   fi
 
