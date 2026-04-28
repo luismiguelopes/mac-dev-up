@@ -2,20 +2,25 @@
 
 # ==============================================================================
 # mac-dev-up: Safe macOS Dev Environment Updater
-# Version: 1.0.6
+# Version: 1.0.8
 # ==============================================================================
 
 set -euo pipefail
 IFS=$'\n\t'
 
-VERSION="1.0.7"
+VERSION="1.0.8"
 REPO_URL="https://raw.githubusercontent.com/luismiguelopes/mac-dev-up/main/mac-dev-up.sh"
 CHECKSUM_URL="https://raw.githubusercontent.com/luismiguelopes/mac-dev-up/main/mac-dev-up.sh.sha256"
 
 # -------------------- ENVIRONMENT RECOVERY --------------------
 # Ensures tools like brew, nvm, and asdf are found when run via LaunchAgent.
-export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:$HOME/.asdf/shims:$HOME/.asdf/bin:$HOME/.pyenv/shims:$HOME/.pyenv/bin:$HOME/.rbenv/shims:$HOME/.rbenv/bin:$HOME/.cargo/bin:$PATH"
-[ -d "$HOME/.nvm" ] && export NVM_DIR="$HOME/.nvm"
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:$HOME/.asdf/shims:$HOME/.asdf/bin:$HOME/.pyenv/shims:$HOME/.pyenv/bin:$HOME/.rbenv/shims:$HOME/.rbenv/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
+if [ -d "$HOME/.nvm" ]; then
+  export NVM_DIR="$HOME/.nvm"
+  # Source nvm to activate the default Node version — required when running via LaunchAgent,
+  # which does not load shell profiles so NVM_DIR alone is not enough.
+  [ -s "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh"
+fi
 
 # -------------------- CONFIG DEFAULTS --------------------
 MODE_SAFE=true
@@ -37,6 +42,8 @@ DO_COMPOSER=false
 DO_RUST=false
 DO_MISE=false
 DO_GO=false
+DO_PIPX=false
+DO_MAS=false
 
 # -------------------- COLORS --------------------
 RED='\033[0;31m'
@@ -220,6 +227,8 @@ for arg in "$@"; do
     --rust)           DO_RUST=true;     RUN_ALL=false ;;
     --mise)           DO_MISE=true;     RUN_ALL=false ;;
     --go)             DO_GO=true;       RUN_ALL=false ;;
+    --pipx)           DO_PIPX=true;     RUN_ALL=false ;;
+    --mas)            DO_MAS=true;      RUN_ALL=false ;;
     --safe)           MODE_SAFE=true ;;
     --full)           MODE_SAFE=false ;;
     --fast)           MODE_FAST=true ;;
@@ -240,6 +249,8 @@ for arg in "$@"; do
       echo "  --rust             Update Rust toolchain"
       echo "  --mise             Update mise and all managed tools"
       echo "  --go               Update Go toolchain"
+      echo "  --pipx             Update all pipx-installed packages"
+      echo "  --mas              Update Mac App Store apps (requires mas-cli)"
       echo "  --exclude=LIST     Skip modules (comma-separated, e.g. --exclude=macos,ruby)"
       echo ""
       echo "Execution modes:"
@@ -560,11 +571,27 @@ update_go() {
   warn "Go toolchain found but no supported version manager detected. Update manually from https://go.dev/dl/"
 }
 
+update_pipx() {
+  if ! command -v pipx >/dev/null; then return; fi
+  log "pipx update"
+  run "pipx upgrade-all"
+}
+
+update_mas() {
+  if ! command -v mas >/dev/null; then return; fi
+  if [ "$IS_CRON_RUN" = true ]; then
+    warn "Skipping Mac App Store update during silent cron run (requires App Store authentication)."
+    return
+  fi
+  log "Mac App Store update"
+  run "mas upgrade"
+}
+
 # -------------------- EXECUTION --------------------
 run_selected() {
   if [ "$RUN_ALL" = true ]; then
     DO_BREW=true; DO_PYTHON=true; DO_NPM=true; DO_RUBY=true
-    DO_MACOS=true; DO_COMPOSER=true; DO_RUST=true; DO_MISE=true; DO_GO=true
+    DO_MACOS=true; DO_COMPOSER=true; DO_RUST=true; DO_MISE=true; DO_GO=true; DO_PIPX=true; DO_MAS=true
   fi
 
   if [ "$MODE_FAST" = true ]; then
@@ -578,24 +605,38 @@ run_selected() {
     [ "$DO_MISE"  = true ]    && ! is_excluded "mise"  && run_module "mise"  update_mise
 
     # Background — safe to parallelise; collect PIDs to check exit codes individually
-    local bg_pids=() bg_names=()
+    local bg_pids=() bg_names=() bg_starts=()
     if [ "$DO_COMPOSER" = true ] && ! is_excluded "composer"; then
+      bg_starts+=( $(date +%s) )
       update_composer > "$tmp_dir/composer.log" 2>&1 & bg_pids+=($!); bg_names+=("composer")
     fi
     if [ "$DO_PYTHON" = true ] && ! is_excluded "python"; then
+      bg_starts+=( $(date +%s) )
       update_python   > "$tmp_dir/python.log"   2>&1 & bg_pids+=($!); bg_names+=("python")
     fi
     if [ "$DO_NPM" = true ] && ! is_excluded "npm"; then
+      bg_starts+=( $(date +%s) )
       update_npm      > "$tmp_dir/npm.log"      2>&1 & bg_pids+=($!); bg_names+=("npm")
     fi
     if [ "$DO_RUBY" = true ] && ! is_excluded "ruby"; then
+      bg_starts+=( $(date +%s) )
       update_ruby     > "$tmp_dir/ruby.log"     2>&1 & bg_pids+=($!); bg_names+=("ruby")
     fi
     if [ "$DO_RUST" = true ] && ! is_excluded "rust"; then
+      bg_starts+=( $(date +%s) )
       update_rust     > "$tmp_dir/rust.log"     2>&1 & bg_pids+=($!); bg_names+=("rust")
     fi
     if [ "$DO_GO" = true ] && ! is_excluded "go"; then
+      bg_starts+=( $(date +%s) )
       update_go       > "$tmp_dir/go.log"       2>&1 & bg_pids+=($!); bg_names+=("go")
+    fi
+    if [ "$DO_PIPX" = true ] && ! is_excluded "pipx"; then
+      bg_starts+=( $(date +%s) )
+      update_pipx     > "$tmp_dir/pipx.log"     2>&1 & bg_pids+=($!); bg_names+=("pipx")
+    fi
+    if [ "$DO_MAS" = true ] && ! is_excluded "mas"; then
+      bg_starts+=( $(date +%s) )
+      update_mas      > "$tmp_dir/mas.log"      2>&1 & bg_pids+=($!); bg_names+=("mas")
     fi
 
     # Collect results and print logs in launch order
@@ -603,7 +644,8 @@ run_selected() {
     for i in "${!bg_pids[@]}"; do
       local name="${bg_names[$i]}" status="ok"
       wait "${bg_pids[$i]}" || status="failed"
-      record_result "$name" "$status" "bg"
+      local elapsed=$(( $(date +%s) - ${bg_starts[$i]} ))
+      record_result "$name" "$status" "${elapsed}s"
       echo -e "\n${BLUE}=== $name ===${NC}"
       cat "$tmp_dir/${name}.log" 2>/dev/null || true
     done
@@ -618,6 +660,8 @@ run_selected() {
     [ "$DO_RUBY" = true ]     && ! is_excluded "ruby"     && run_module "ruby"     update_ruby
     [ "$DO_RUST" = true ]     && ! is_excluded "rust"     && run_module "rust"     update_rust
     [ "$DO_GO" = true ]       && ! is_excluded "go"       && run_module "go"       update_go
+    [ "$DO_PIPX" = true ]     && ! is_excluded "pipx"     && run_module "pipx"     update_pipx
+    [ "$DO_MAS" = true ]      && ! is_excluded "mas"      && run_module "mas"      update_mas
   fi
 }
 
