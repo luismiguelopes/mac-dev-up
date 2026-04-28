@@ -40,10 +40,12 @@ mac-dev-up [options]
 | `--brew` | Update Homebrew packages and casks |
 | `--python` | Update pip, setuptools, and wheel |
 | `--npm` | Update global Node packages (falls back to `pnpm` or `yarn` if detected) |
-| `--ruby` | Update RubyGems (respects `Rbenv` and `ASDF`) |
+| `--ruby` | Update RubyGems (respects `Rbenv`, `ASDF`, and `mise`) |
 | `--macos` | Check and install macOS software updates |
 | `--composer` | Update Composer and global packages |
 | `--rust` | Update Rust toolchain via `rustup` |
+| `--mise` | Update mise itself and all tools it manages |
+| `--go` | Update Go toolchain (supports mise, asdf, and brew) |
 | `--exclude=LIST` | Skip specific modules, comma-separated (e.g. `--exclude=macos,ruby`) |
 
 ### Execution Modes
@@ -55,7 +57,9 @@ mac-dev-up [options]
 | `--fast` | Parallel execution for independent tasks |
 | `--dry-run` | Preview mode — shows what would run without making any changes |
 | `--verbose` | Detailed logs for debugging |
+| `--version` | Print the current version and exit |
 | `--install-cron` | Install a macOS `LaunchAgent` to run `mac-dev-up` silently every Sunday at 10:00 AM |
+| `--uninstall-cron` | Remove the macOS `LaunchAgent` |
 
 ### Run Summary
 
@@ -115,12 +119,14 @@ shasum -a 256 -c mac-dev-up.sh.sha256
 | Tool | Version Manager Support |
 |---|---|
 | Homebrew | — |
-| Python / pip | `pyenv`, `asdf`, system (safe mode skips) |
-| Node.js / npm | `nvm`, `asdf`, `pnpm`, `yarn` |
-| Ruby / gems | `rbenv`, `asdf`, system (SIP-protected, always skipped) |
+| Python / pip | `pyenv`, `asdf`, `mise`, system (safe mode skips) |
+| Node.js / npm | `nvm`, `asdf`, `mise`, `pnpm`, `yarn` |
+| Ruby / gems | `rbenv`, `asdf`, `mise`, system (SIP-protected, always skipped) |
 | Rust | `rustup` |
 | PHP / Composer | — |
 | macOS | `softwareupdate` |
+| mise | — |
+| Go | `mise`, `asdf`, `brew` |
 
 ## License
 

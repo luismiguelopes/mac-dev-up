@@ -8,7 +8,7 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-VERSION="1.0.6"
+VERSION="1.0.7"
 REPO_URL="https://raw.githubusercontent.com/luismiguelopes/mac-dev-up/main/mac-dev-up.sh"
 CHECKSUM_URL="https://raw.githubusercontent.com/luismiguelopes/mac-dev-up/main/mac-dev-up.sh.sha256"
 
@@ -23,6 +23,7 @@ MODE_FAST=false
 DRY_RUN=false
 VERBOSE=false
 INSTALL_CRON=false
+UNINSTALL_CRON=false
 IS_CRON_RUN=false
 EXCLUDE_LIST=""
 
@@ -34,6 +35,8 @@ DO_RUBY=false
 DO_MACOS=false
 DO_COMPOSER=false
 DO_RUST=false
+DO_MISE=false
+DO_GO=false
 
 # -------------------- COLORS --------------------
 RED='\033[0;31m'
@@ -203,22 +206,26 @@ load_config
 
 for arg in "$@"; do
   case $arg in
-    --install-cron) INSTALL_CRON=true ;;
-    --cron)         IS_CRON_RUN=true; RUN_ALL=true ;;
-    --all)          RUN_ALL=true ;;
-    --brew)         DO_BREW=true;     RUN_ALL=false ;;
-    --python)       DO_PYTHON=true;   RUN_ALL=false ;;
-    --npm)          DO_NPM=true;      RUN_ALL=false ;;
-    --ruby)         DO_RUBY=true;     RUN_ALL=false ;;
-    --macos)        DO_MACOS=true;    RUN_ALL=false ;;
-    --composer)     DO_COMPOSER=true; RUN_ALL=false ;;
-    --rust)         DO_RUST=true;     RUN_ALL=false ;;
-    --safe)         MODE_SAFE=true ;;
-    --full)         MODE_SAFE=false ;;
-    --fast)         MODE_FAST=true ;;
-    --dry-run)      DRY_RUN=true ;;
-    --verbose)      VERBOSE=true ;;
-    --exclude=*)    EXCLUDE_LIST="${arg#--exclude=}" ;;
+    --install-cron)   INSTALL_CRON=true ;;
+    --uninstall-cron) UNINSTALL_CRON=true ;;
+    --cron)           IS_CRON_RUN=true; RUN_ALL=true ;;
+    --version)        echo "mac-dev-up $VERSION"; exit 0 ;;
+    --all)            RUN_ALL=true ;;
+    --brew)           DO_BREW=true;     RUN_ALL=false ;;
+    --python)         DO_PYTHON=true;   RUN_ALL=false ;;
+    --npm)            DO_NPM=true;      RUN_ALL=false ;;
+    --ruby)           DO_RUBY=true;     RUN_ALL=false ;;
+    --macos)          DO_MACOS=true;    RUN_ALL=false ;;
+    --composer)       DO_COMPOSER=true; RUN_ALL=false ;;
+    --rust)           DO_RUST=true;     RUN_ALL=false ;;
+    --mise)           DO_MISE=true;     RUN_ALL=false ;;
+    --go)             DO_GO=true;       RUN_ALL=false ;;
+    --safe)           MODE_SAFE=true ;;
+    --full)           MODE_SAFE=false ;;
+    --fast)           MODE_FAST=true ;;
+    --dry-run)        DRY_RUN=true ;;
+    --verbose)        VERBOSE=true ;;
+    --exclude=*)      EXCLUDE_LIST="${arg#--exclude=}" ;;
     --help)
       echo "Usage: mac-dev-up [options]"
       echo ""
@@ -231,6 +238,8 @@ for arg in "$@"; do
       echo "  --macos            Update macOS"
       echo "  --composer         Update Composer"
       echo "  --rust             Update Rust toolchain"
+      echo "  --mise             Update mise and all managed tools"
+      echo "  --go               Update Go toolchain"
       echo "  --exclude=LIST     Skip modules (comma-separated, e.g. --exclude=macos,ruby)"
       echo ""
       echo "Execution modes:"
@@ -239,7 +248,9 @@ for arg in "$@"; do
       echo "  --fast             Parallel execution"
       echo "  --dry-run          Preview only"
       echo "  --verbose          Debug logs"
+      echo "  --version          Print version and exit"
       echo "  --install-cron     Install macOS LaunchAgent (Sundays 10:00 AM)"
+      echo "  --uninstall-cron   Remove the macOS LaunchAgent"
       echo ""
       echo "Config file: ~/.mac-dev-up.conf"
       echo "  MODE=safe|full"
@@ -306,6 +317,23 @@ EOF
 
 if [ "$INSTALL_CRON" = true ]; then
   install_cron
+fi
+
+# -------------------- CRON UNINSTALLER --------------------
+uninstall_cron() {
+  local plist_file="$HOME/Library/LaunchAgents/com.luismiguelopes.mac-dev-up.plist"
+  if [ ! -f "$plist_file" ]; then
+    warn "LaunchAgent not found at $plist_file — nothing to remove."
+    exit 0
+  fi
+  launchctl unload "$plist_file" 2>/dev/null || true
+  rm "$plist_file"
+  success "LaunchAgent removed from $plist_file"
+  exit 0
+}
+
+if [ "$UNINSTALL_CRON" = true ]; then
+  uninstall_cron
 fi
 
 # -------------------- PRECHECK --------------------
@@ -393,6 +421,8 @@ update_python() {
     log "Pyenv Python detected"
   elif command -v asdf >/dev/null && [[ "$py_path" == *"/asdf/"* || "$py_path" == *".asdf"* ]]; then
     log "ASDF Python detected"
+  elif command -v mise >/dev/null && [[ "$py_path" == *"/mise/"* ]]; then
+    log "mise Python detected"
   elif [[ "$py_path" == "/usr/bin/"* ]] && [ "$MODE_SAFE" = true ]; then
     warn "System Python detected. Skipping to avoid permission issues (Safe Mode)."
     return
@@ -422,6 +452,9 @@ update_npm() {
   elif command -v asdf >/dev/null && asdf current nodejs >/dev/null 2>&1; then
     log "ASDF Node.js detected. Updating npm"
     run "npm install -g npm"
+  elif command -v mise >/dev/null && mise current node >/dev/null 2>&1; then
+    log "mise Node.js detected. Updating npm"
+    run "npm install -g npm"
   fi
 
   # Package managers (pnpm > yarn > npm)
@@ -440,7 +473,7 @@ update_npm() {
       return
     fi
 
-    if [ "$MODE_SAFE" = true ] && [[ "$prefix" != *".nvm"* ]] && [[ "$prefix" != *".asdf"* ]]; then
+    if [ "$MODE_SAFE" = true ] && [[ "$prefix" != *".nvm"* ]] && [[ "$prefix" != *".asdf"* ]] && [[ "$prefix" != *"/mise/"* ]]; then
       warn "Skipping npm global packages update (Safe Mode)."
       return
     fi
@@ -460,6 +493,8 @@ update_ruby() {
     log "Rbenv Ruby detected"
   elif command -v asdf >/dev/null && [[ "$gem_path" == *"/asdf/"* || "$gem_path" == *".asdf"* ]]; then
     log "ASDF Ruby detected"
+  elif command -v mise >/dev/null && [[ "$gem_path" == *"/mise/"* ]]; then
+    log "mise Ruby detected"
   elif [[ "$gem_path" == "/usr/bin/"* ]]; then
     warn "System Ruby detected (SIP Protected). Skipping."
     return
@@ -467,7 +502,8 @@ update_ruby() {
 
   if [ "$MODE_SAFE" = true ] && \
      [[ "$gem_path" != *"/rbenv/"* ]] && [[ "$gem_path" != *"/asdf/"* ]] && \
-     [[ "$gem_path" != *".rbenv"* ]] && [[ "$gem_path" != *".asdf"* ]]; then
+     [[ "$gem_path" != *".rbenv"* ]] && [[ "$gem_path" != *".asdf"* ]] && \
+     [[ "$gem_path" != *"/mise/"* ]]; then
     warn "Skipping Ruby gems (Safe Mode)."
     return
   fi
@@ -492,21 +528,54 @@ update_rust() {
   run "rustup update"
 }
 
+update_mise() {
+  if ! command -v mise >/dev/null; then return; fi
+  log "mise update"
+  run "mise self-update --yes 2>/dev/null || true"
+  run "mise upgrade"
+}
+
+update_go() {
+  if ! command -v go >/dev/null; then return; fi
+
+  local go_path
+  go_path=$(which go)
+
+  if command -v mise >/dev/null && [[ "$go_path" == *"/mise/"* ]]; then
+    log "mise Go detected"
+    run "mise upgrade go"
+    return
+  fi
+
+  if [[ "$go_path" == *"/homebrew/"* || "$go_path" == *"/Homebrew/"* || "$go_path" == "/usr/local/bin/go" ]]; then
+    log "Homebrew Go detected — handled by the brew module."
+    return
+  fi
+
+  if command -v asdf >/dev/null && [[ "$go_path" == *"/asdf/"* || "$go_path" == *".asdf"* ]]; then
+    warn "ASDF Go detected. Update via: asdf install golang <version>"
+    return
+  fi
+
+  warn "Go toolchain found but no supported version manager detected. Update manually from https://go.dev/dl/"
+}
+
 # -------------------- EXECUTION --------------------
 run_selected() {
   if [ "$RUN_ALL" = true ]; then
     DO_BREW=true; DO_PYTHON=true; DO_NPM=true; DO_RUBY=true
-    DO_MACOS=true; DO_COMPOSER=true; DO_RUST=true
+    DO_MACOS=true; DO_COMPOSER=true; DO_RUST=true; DO_MISE=true; DO_GO=true
   fi
 
   if [ "$MODE_FAST" = true ]; then
-    warn "Fast mode enabled. Foreground: macos, brew. Background: everything else."
+    warn "Fast mode enabled. Foreground: macos, brew, mise. Background: everything else."
     local tmp_dir
     tmp_dir=$(mktemp -d)
 
-    # Foreground — must run sequentially (sudo, brew locks)
+    # Foreground — must run sequentially (sudo, brew locks; mise modifies shims)
     [ "$DO_MACOS" = true ]    && ! is_excluded "macos" && run_module "macos" update_macos
     [ "$DO_BREW"  = true ]    && ! is_excluded "brew"  && run_module "brew"  update_brew
+    [ "$DO_MISE"  = true ]    && ! is_excluded "mise"  && run_module "mise"  update_mise
 
     # Background — safe to parallelise; collect PIDs to check exit codes individually
     local bg_pids=() bg_names=()
@@ -525,6 +594,9 @@ run_selected() {
     if [ "$DO_RUST" = true ] && ! is_excluded "rust"; then
       update_rust     > "$tmp_dir/rust.log"     2>&1 & bg_pids+=($!); bg_names+=("rust")
     fi
+    if [ "$DO_GO" = true ] && ! is_excluded "go"; then
+      update_go       > "$tmp_dir/go.log"       2>&1 & bg_pids+=($!); bg_names+=("go")
+    fi
 
     # Collect results and print logs in launch order
     local i
@@ -539,11 +611,13 @@ run_selected() {
   else
     [ "$DO_MACOS" = true ]    && ! is_excluded "macos"    && run_module "macos"    update_macos
     [ "$DO_BREW" = true ]     && ! is_excluded "brew"     && run_module "brew"     update_brew
+    [ "$DO_MISE" = true ]     && ! is_excluded "mise"     && run_module "mise"     update_mise
     [ "$DO_COMPOSER" = true ] && ! is_excluded "composer" && run_module "composer" update_composer
     [ "$DO_PYTHON" = true ]   && ! is_excluded "python"   && run_module "python"   update_python
     [ "$DO_NPM" = true ]      && ! is_excluded "npm"      && run_module "npm"      update_npm
     [ "$DO_RUBY" = true ]     && ! is_excluded "ruby"     && run_module "ruby"     update_ruby
     [ "$DO_RUST" = true ]     && ! is_excluded "rust"     && run_module "rust"     update_rust
+    [ "$DO_GO" = true ]       && ! is_excluded "go"       && run_module "go"       update_go
   fi
 }
 
