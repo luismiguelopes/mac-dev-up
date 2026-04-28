@@ -1,3 +1,2 @@
-.DS_Store
-.vscode/
-*.swp
+# mac-dev-up local config (not part of the repo)
+.mac-dev-up.conf
