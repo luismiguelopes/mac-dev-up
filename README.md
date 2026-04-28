@@ -46,6 +46,8 @@ mac-dev-up [options]
 | `--rust` | Update Rust toolchain via `rustup` |
 | `--mise` | Update mise itself and all tools it manages |
 | `--go` | Update Go toolchain (supports mise, asdf, and brew) |
+| `--pipx` | Update all pipx-installed packages via `pipx upgrade-all` |
+| `--mas` | Update Mac App Store apps (requires [mas-cli](https://github.com/mas-cli/mas)) |
 | `--exclude=LIST` | Skip specific modules, comma-separated (e.g. `--exclude=macos,ruby`) |
 
 ### Execution Modes
@@ -127,6 +129,8 @@ shasum -a 256 -c mac-dev-up.sh.sha256
 | macOS | `softwareupdate` |
 | mise | — |
 | Go | `mise`, `asdf`, `brew` |
+| pipx | — |
+| Mac App Store | `mas-cli` |
 
 ## License
 
