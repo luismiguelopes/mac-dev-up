@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # /bin/bash is the macOS-shipped bash 3.2 the script must stay compatible with
+      - name: Syntax check (bash 3.2 and modern bash)
+        run: |
+          /bin/bash -n mac-dev-up.sh
+          bash -n mac-dev-up.sh
+
+      - name: ShellCheck
+        run: |
+          command -v shellcheck >/dev/null || brew install shellcheck
+          shellcheck mac-dev-up.sh
+
+      - name: Verify committed checksum
+        run: shasum -a 256 -c mac-dev-up.sh.sha256
+
+      - name: Dry-run all modules (sequential)
+        run: /bin/bash mac-dev-up.sh --cron --dry-run --all --verbose
+
+      - name: Dry-run all modules (fast mode)
+        run: /bin/bash mac-dev-up.sh --cron --dry-run --fast --verbose
+
+      # Regression: selective runs used to die before the summary (v1.0.9)
+      - name: Dry-run selective module
+        run: /bin/bash mac-dev-up.sh --cron --dry-run --brew
+
+      # Regression: empty background-job array crashed on bash 3.2 (v1.0.9)
+      - name: Dry-run fast mode with all background modules excluded
+        run: /bin/bash mac-dev-up.sh --cron --dry-run --fast --exclude=composer,python,npm,ruby,rust,go,pipx,mas
+
+      - name: Version flag
+        run: /bin/bash mac-dev-up.sh --version

@@ -1,5 +1,7 @@
 # mac-dev-up: Safe macOS Dev Environment Updater
 
+[![CI](https://github.com/luismiguelopes/mac-dev-up/actions/workflows/ci.yml/badge.svg)](https://github.com/luismiguelopes/mac-dev-up/actions/workflows/ci.yml)
+
 `mac-dev-up` is a bash script designed to securely, quickly, and reliably keep your macOS development environment up to date.
 
 ## Features
@@ -10,7 +12,7 @@
 - **Per-Module Run Summary** — prints a summary at the end of every run showing which modules succeeded, which failed, and how long each one took.
 - **Config File Support** — persist your preferences in `~/.mac-dev-up.conf` without passing flags every time.
 - **Selective Exclusion** — skip specific modules with `--exclude` even when running `--all`.
-- **Verified Auto-Update** — checks for newer versions and verifies the download against a SHA-256 checksum before installing.
+- **Verified Auto-Update** — checks for newer versions and verifies the download against a SHA-256 checksum before installing; the update is refused if the checksum cannot be retrieved.
 - **Smart Tool Installation** — detects if Homebrew is missing and offers to install it on the fly.
 - **Sudo Heartbeat** — refreshes `sudo` in the background so you only need to enter your password once.
 - **Resilient Internet Check** — validates connectivity before proceeding.

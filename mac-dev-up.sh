@@ -2,13 +2,13 @@
 
 # ==============================================================================
 # mac-dev-up: Safe macOS Dev Environment Updater
-# Version: 1.0.9
+# Version: 1.1.0
 # ==============================================================================
 
 set -euo pipefail
 IFS=$'\n\t'
 
-VERSION="1.0.9"
+VERSION="1.1.0"
 REPO_URL="https://raw.githubusercontent.com/luismiguelopes/mac-dev-up/main/mac-dev-up.sh"
 CHECKSUM_URL="https://raw.githubusercontent.com/luismiguelopes/mac-dev-up/main/mac-dev-up.sh.sha256"
 
@@ -19,6 +19,7 @@ if [ -d "$HOME/.nvm" ]; then
   export NVM_DIR="$HOME/.nvm"
   # Source nvm to activate the default Node version — required when running via LaunchAgent,
   # which does not load shell profiles so NVM_DIR alone is not enough.
+  # shellcheck disable=SC1091
   [ -s "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh"
 fi
 
@@ -59,12 +60,21 @@ error()   { echo -e "${RED}✖ $*${NC}"; exit 1; }
 
 # Uses bash -c in an isolated subshell instead of eval to avoid double-expansion
 # and limit the blast radius of any unexpected input.
+# A failed command does not abort the module: it bumps RUN_FAILURES (reset per
+# module) so the module finishes its remaining commands and is then reported as
+# failed — the same semantics in sequential and fast mode.
+RUN_FAILURES=0
+
 run() {
   if [ "$DRY_RUN" = true ]; then
     echo "[DRY-RUN] $*"
-  else
-    [ "$VERBOSE" = true ] && echo "[RUN] $*"
-    bash -c "$*"
+    return 0
+  fi
+  [ "$VERBOSE" = true ] && echo "[RUN] $*"
+  if ! bash -c "$*"; then
+    RUN_FAILURES=$((RUN_FAILURES + 1))
+    warn "Command failed: $*"
+    return 1
   fi
 }
 
@@ -137,11 +147,14 @@ print_summary() {
 }
 
 # Wraps a module function to track its success/failure and elapsed time.
-# Safe under set -e because the module call is inside an if-condition.
+# Calling the module inside an if-condition disables errexit within it, which
+# is what lets modules continue past failed commands; run() records every
+# failure in RUN_FAILURES, so any failed command marks the module as failed.
 run_module() {
   local name="$1" func="$2" start elapsed
   start=$(date +%s)
-  if "$func"; then
+  RUN_FAILURES=0
+  if "$func" && [ "$RUN_FAILURES" -eq 0 ]; then
     elapsed=$(( $(date +%s) - start ))
     record_result "$name" "ok" "${elapsed}s"
   else
@@ -191,7 +204,9 @@ check_updates() {
         fi
         success "Integrity verified."
       else
-        warn "Checksum file not found at remote — skipping integrity check."
+        warn "Checksum file not found at remote — aborting update for safety."
+        rm -f "$tmp_script" "$tmp_checksum"
+        return
       fi
 
       install_path=$(command -v mac-dev-up || echo "/usr/local/bin/mac-dev-up")
@@ -396,6 +411,7 @@ update_brew() {
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
       log "Installing Homebrew..."
+      # shellcheck disable=SC2016
       run '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
       if [ "$DRY_RUN" = true ]; then return; fi
       if [ -x "/opt/homebrew/bin/brew" ]; then
@@ -616,11 +632,19 @@ update_mas() {
 # Launches a module in the background for fast mode. Relies on bash dynamic
 # scoping: bg_pids/bg_names/bg_starts and tmp_dir are locals of run_selected.
 # The EXIT trap records the job's own end time so elapsed isn't inflated by
-# the sequential wait order in the collect loop.
+# the sequential wait order in the collect loop. The if-wrapper mirrors
+# run_module so failure semantics are identical in both modes.
 launch_bg() {
   local name="$1" func="$2"
   bg_starts+=( "$(date +%s)" )
-  ( trap 'date +%s > "$tmp_dir/$name.end"' EXIT; "$func" ) > "$tmp_dir/$name.log" 2>&1 &
+  (
+    trap 'date +%s > "$tmp_dir/$name.end"' EXIT
+    RUN_FAILURES=0
+    if "$func" && [ "$RUN_FAILURES" -eq 0 ]; then
+      exit 0
+    fi
+    exit 1
+  ) > "$tmp_dir/$name.log" 2>&1 &
   bg_pids+=($!)
   bg_names+=("$name")
 }
