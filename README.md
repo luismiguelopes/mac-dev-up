@@ -15,7 +15,7 @@
 - **Sudo Heartbeat** — refreshes `sudo` in the background so you only need to enter your password once.
 - **Resilient Internet Check** — validates connectivity before proceeding.
 - **Dry-Run Mode** — preview every command that would be executed without touching the system.
-- **macOS Native Notifications** — triggers a system notification when the update process completes.
+- **macOS Native Notifications** — triggers a system notification when the update process completes, reporting success or failure.
 - **LaunchAgent Installer** — generates and registers a native macOS `LaunchAgent` that runs the script silently every Sunday at 10:00 AM, with full output logging.
 
 ## Installation
@@ -74,6 +74,8 @@ At the end of every run, a per-module summary is printed:
 ⚠  npm      — FAILED (4s)
 ✔  rust     — 12s
 ```
+
+If any module fails, the script exits with status `1`, so failures are detectable in automated runs (e.g. the LaunchAgent logs).
 
 ## Config File
 

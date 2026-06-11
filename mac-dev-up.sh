@@ -2,13 +2,13 @@
 
 # ==============================================================================
 # mac-dev-up: Safe macOS Dev Environment Updater
-# Version: 1.0.8
+# Version: 1.0.9
 # ==============================================================================
 
 set -euo pipefail
 IFS=$'\n\t'
 
-VERSION="1.0.8"
+VERSION="1.0.9"
 REPO_URL="https://raw.githubusercontent.com/luismiguelopes/mac-dev-up/main/mac-dev-up.sh"
 CHECKSUM_URL="https://raw.githubusercontent.com/luismiguelopes/mac-dev-up/main/mac-dev-up.sh.sha256"
 
@@ -387,6 +387,10 @@ update_brew() {
   local brew_cmd="brew"
 
   if ! command -v brew >/dev/null; then
+    if [ "$IS_CRON_RUN" = true ]; then
+      warn "Homebrew not found — skipping install prompt during silent cron run."
+      return
+    fi
     warn "Homebrew not found."
     read -p "Do you want to install Homebrew? (y/n) " -n 1 -r
     echo
@@ -468,11 +472,32 @@ update_npm() {
     run "npm install -g npm"
   fi
 
-  # Package managers (pnpm > yarn > npm)
+  # Package managers (pnpm > yarn > npm) — same safety rules as the npm branch:
+  # never touch system paths, and in safe mode only update under a version manager.
   if command -v pnpm >/dev/null; then
+    local pnpm_path
+    pnpm_path=$(which pnpm)
+    if [[ "$pnpm_path" == "/usr/local/"* ]] || [[ "$pnpm_path" == "/usr/bin/"* ]]; then
+      warn "pnpm is in a system path. Skipping for safety."
+      return
+    fi
+    if [ "$MODE_SAFE" = true ] && [[ "$pnpm_path" != *".nvm"* ]] && [[ "$pnpm_path" != *".asdf"* ]] && [[ "$pnpm_path" != *"/mise/"* ]]; then
+      warn "Skipping pnpm global update (Safe Mode)."
+      return
+    fi
     log "pnpm global update"
     run "pnpm update -g"
   elif command -v yarn >/dev/null; then
+    local yarn_path
+    yarn_path=$(which yarn)
+    if [[ "$yarn_path" == "/usr/local/"* ]] || [[ "$yarn_path" == "/usr/bin/"* ]]; then
+      warn "yarn is in a system path. Skipping for safety."
+      return
+    fi
+    if [ "$MODE_SAFE" = true ] && [[ "$yarn_path" != *".nvm"* ]] && [[ "$yarn_path" != *".asdf"* ]] && [[ "$yarn_path" != *"/mise/"* ]]; then
+      warn "Skipping yarn global upgrade (Safe Mode)."
+      return
+    fi
     log "yarn global update"
     run "yarn global upgrade"
   elif command -v npm >/dev/null; then
@@ -588,6 +613,18 @@ update_mas() {
 }
 
 # -------------------- EXECUTION --------------------
+# Launches a module in the background for fast mode. Relies on bash dynamic
+# scoping: bg_pids/bg_names/bg_starts and tmp_dir are locals of run_selected.
+# The EXIT trap records the job's own end time so elapsed isn't inflated by
+# the sequential wait order in the collect loop.
+launch_bg() {
+  local name="$1" func="$2"
+  bg_starts+=( "$(date +%s)" )
+  ( trap 'date +%s > "$tmp_dir/$name.end"' EXIT; "$func" ) > "$tmp_dir/$name.log" 2>&1 &
+  bg_pids+=($!)
+  bg_names+=("$name")
+}
+
 run_selected() {
   if [ "$RUN_ALL" = true ]; then
     DO_BREW=true; DO_PYTHON=true; DO_NPM=true; DO_RUBY=true
@@ -606,49 +643,28 @@ run_selected() {
 
     # Background — safe to parallelise; collect PIDs to check exit codes individually
     local bg_pids=() bg_names=() bg_starts=()
-    if [ "$DO_COMPOSER" = true ] && ! is_excluded "composer"; then
-      bg_starts+=( $(date +%s) )
-      update_composer > "$tmp_dir/composer.log" 2>&1 & bg_pids+=($!); bg_names+=("composer")
-    fi
-    if [ "$DO_PYTHON" = true ] && ! is_excluded "python"; then
-      bg_starts+=( $(date +%s) )
-      update_python   > "$tmp_dir/python.log"   2>&1 & bg_pids+=($!); bg_names+=("python")
-    fi
-    if [ "$DO_NPM" = true ] && ! is_excluded "npm"; then
-      bg_starts+=( $(date +%s) )
-      update_npm      > "$tmp_dir/npm.log"      2>&1 & bg_pids+=($!); bg_names+=("npm")
-    fi
-    if [ "$DO_RUBY" = true ] && ! is_excluded "ruby"; then
-      bg_starts+=( $(date +%s) )
-      update_ruby     > "$tmp_dir/ruby.log"     2>&1 & bg_pids+=($!); bg_names+=("ruby")
-    fi
-    if [ "$DO_RUST" = true ] && ! is_excluded "rust"; then
-      bg_starts+=( $(date +%s) )
-      update_rust     > "$tmp_dir/rust.log"     2>&1 & bg_pids+=($!); bg_names+=("rust")
-    fi
-    if [ "$DO_GO" = true ] && ! is_excluded "go"; then
-      bg_starts+=( $(date +%s) )
-      update_go       > "$tmp_dir/go.log"       2>&1 & bg_pids+=($!); bg_names+=("go")
-    fi
-    if [ "$DO_PIPX" = true ] && ! is_excluded "pipx"; then
-      bg_starts+=( $(date +%s) )
-      update_pipx     > "$tmp_dir/pipx.log"     2>&1 & bg_pids+=($!); bg_names+=("pipx")
-    fi
-    if [ "$DO_MAS" = true ] && ! is_excluded "mas"; then
-      bg_starts+=( $(date +%s) )
-      update_mas      > "$tmp_dir/mas.log"      2>&1 & bg_pids+=($!); bg_names+=("mas")
-    fi
+    [ "$DO_COMPOSER" = true ] && ! is_excluded "composer" && launch_bg "composer" update_composer
+    [ "$DO_PYTHON" = true ]   && ! is_excluded "python"   && launch_bg "python"   update_python
+    [ "$DO_NPM" = true ]      && ! is_excluded "npm"      && launch_bg "npm"      update_npm
+    [ "$DO_RUBY" = true ]     && ! is_excluded "ruby"     && launch_bg "ruby"     update_ruby
+    [ "$DO_RUST" = true ]     && ! is_excluded "rust"     && launch_bg "rust"     update_rust
+    [ "$DO_GO" = true ]       && ! is_excluded "go"       && launch_bg "go"       update_go
+    [ "$DO_PIPX" = true ]     && ! is_excluded "pipx"     && launch_bg "pipx"     update_pipx
+    [ "$DO_MAS" = true ]      && ! is_excluded "mas"      && launch_bg "mas"      update_mas
 
-    # Collect results and print logs in launch order
-    local i
-    for i in "${!bg_pids[@]}"; do
-      local name="${bg_names[$i]}" status="ok"
-      wait "${bg_pids[$i]}" || status="failed"
-      local elapsed=$(( $(date +%s) - ${bg_starts[$i]} ))
-      record_result "$name" "$status" "${elapsed}s"
-      echo -e "\n${BLUE}=== $name ===${NC}"
-      cat "$tmp_dir/${name}.log" 2>/dev/null || true
-    done
+    # Collect results and print logs in launch order.
+    # Length check required: expanding an empty array trips set -u on bash < 4.4.
+    if [ ${#bg_pids[@]} -gt 0 ]; then
+      local i
+      for i in "${!bg_pids[@]}"; do
+        local name="${bg_names[$i]}" status="ok" end_time
+        wait "${bg_pids[$i]}" || status="failed"
+        end_time=$(cat "$tmp_dir/${name}.end" 2>/dev/null || date +%s)
+        record_result "$name" "$status" "$(( end_time - ${bg_starts[$i]} ))s"
+        echo -e "\n${BLUE}=== $name ===${NC}"
+        cat "$tmp_dir/${name}.log" 2>/dev/null || true
+      done
+    fi
     rm -rf "$tmp_dir"
   else
     [ "$DO_MACOS" = true ]    && ! is_excluded "macos"    && run_module "macos"    update_macos
@@ -663,6 +679,10 @@ run_selected() {
     [ "$DO_PIPX" = true ]     && ! is_excluded "pipx"     && run_module "pipx"     update_pipx
     [ "$DO_MAS" = true ]      && ! is_excluded "mas"      && run_module "mas"      update_mas
   fi
+
+  # A disabled module leaves the last &&-list with status 1, which set -e would
+  # treat as run_selected failing — killing the script before the summary.
+  return 0
 }
 
 # -------------------- RUN --------------------
@@ -671,6 +691,17 @@ run_selected
 TOTAL=$(( $(date +%s) - START ))
 
 print_summary
+
+case "$SUMMARY_ITEMS" in
+  *":failed:"*)
+    warn "Environment updated in ${TOTAL}s — some modules failed."
+    if [ "$DRY_RUN" = false ]; then
+      osascript -e 'display notification "Some updates failed — check the run summary." with title "mac-dev-up"'
+    fi
+    exit 1
+    ;;
+esac
+
 success "Environment updated in ${TOTAL}s"
 
 if [ "$DRY_RUN" = false ]; then
