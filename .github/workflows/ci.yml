@@ -9,7 +9,7 @@ jobs:
   ci:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # /bin/bash is the macOS-shipped bash 3.2 the script must stay compatible with
       - name: Syntax check (bash 3.2 and modern bash)
