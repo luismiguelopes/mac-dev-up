@@ -11,13 +11,14 @@
 - **Fast Mode (Parallel Execution)** — runs independent tasks concurrently, tracking each background job individually and reporting its exit code.
 - **Per-Module Run Summary** — prints a summary at the end of every run showing which modules succeeded, which failed, and how long each one took.
 - **Config File Support** — persist your preferences in `~/.mac-dev-up.conf` without passing flags every time.
-- **Selective Exclusion** — skip specific modules with `--exclude` even when running `--all`.
+- **Selective Runs** — run only the modules you want with `--only`, or skip specific ones with `--exclude` even when running `--all`.
+- **Run Status at a Glance** — the result of every run is saved; `--status` shows how the last run went without digging through logs.
 - **Verified Auto-Update** — checks for newer versions and verifies the download against a SHA-256 checksum before installing; the update is refused if the checksum cannot be retrieved.
 - **Smart Tool Installation** — detects if Homebrew is missing and offers to install it on the fly.
 - **Sudo Heartbeat** — refreshes `sudo` in the background so you only need to enter your password once.
 - **Resilient Internet Check** — validates connectivity before proceeding.
 - **Dry-Run Mode** — preview every command that would be executed without touching the system.
-- **macOS Native Notifications** — triggers a system notification when the update process completes, reporting success or failure.
+- **macOS Native Notifications** — triggers a system notification when the update process completes, with real module counts (e.g. "1 of 9 modules failed: ruby").
 - **LaunchAgent Installer** — generates and registers a native macOS `LaunchAgent` that runs the script silently every Sunday at 10:00 AM, with full output logging.
 
 ## Installation
@@ -50,6 +51,7 @@ mac-dev-up [options]
 | `--go` | Update Go toolchain (supports mise, asdf, and brew) |
 | `--pipx` | Update all pipx-installed packages via `pipx upgrade-all` |
 | `--mas` | Update Mac App Store apps (requires [mas-cli](https://github.com/mas-cli/mas)) |
+| `--only=LIST` | Run only specific modules, comma-separated (e.g. `--only=brew,npm`) |
 | `--exclude=LIST` | Skip specific modules, comma-separated (e.g. `--exclude=macos,ruby`) |
 
 ### Execution Modes
@@ -61,6 +63,7 @@ mac-dev-up [options]
 | `--fast` | Parallel execution for independent tasks |
 | `--dry-run` | Preview mode — shows what would run without making any changes |
 | `--verbose` | Detailed logs for debugging |
+| `--status` | Show the result of the last run and exit |
 | `--version` | Print the current version and exit |
 | `--install-cron` | Install a macOS `LaunchAgent` to run `mac-dev-up` silently every Sunday at 10:00 AM |
 | `--uninstall-cron` | Remove the macOS `LaunchAgent` |
@@ -78,6 +81,12 @@ At the end of every run, a per-module summary is printed:
 ```
 
 If any module fails, the script exits with status `1`, so failures are detectable in automated runs (e.g. the LaunchAgent logs).
+
+The summary of every run (except dry runs) is also saved to `~/Library/Logs/mac-dev-up/last-run.txt` and can be checked at any time:
+
+```bash
+mac-dev-up --status
+```
 
 ## Config File
 

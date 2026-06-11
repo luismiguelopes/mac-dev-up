@@ -39,5 +39,11 @@ jobs:
       - name: Dry-run fast mode with all background modules excluded
         run: /bin/bash mac-dev-up.sh --cron --dry-run --fast --exclude=composer,python,npm,ruby,rust,go,pipx,mas
 
+      - name: Dry-run with --only
+        run: /bin/bash mac-dev-up.sh --cron --dry-run --only=brew,rust
+
+      - name: Status flag with no recorded run
+        run: /bin/bash mac-dev-up.sh --status
+
       - name: Version flag
         run: /bin/bash mac-dev-up.sh --version

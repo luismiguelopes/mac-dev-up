@@ -2,13 +2,13 @@
 
 # ==============================================================================
 # mac-dev-up: Safe macOS Dev Environment Updater
-# Version: 1.1.0
+# Version: 1.2.0
 # ==============================================================================
 
 set -euo pipefail
 IFS=$'\n\t'
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 REPO_URL="https://raw.githubusercontent.com/luismiguelopes/mac-dev-up/main/mac-dev-up.sh"
 CHECKSUM_URL="https://raw.githubusercontent.com/luismiguelopes/mac-dev-up/main/mac-dev-up.sh.sha256"
 
@@ -31,7 +31,9 @@ VERBOSE=false
 INSTALL_CRON=false
 UNINSTALL_CRON=false
 IS_CRON_RUN=false
+SHOW_STATUS=false
 EXCLUDE_LIST=""
+ONLY_LIST=""
 
 RUN_ALL=true
 DO_BREW=false
@@ -146,6 +148,41 @@ print_summary() {
   done
 }
 
+summary_counts() {
+  local IFS='|' item name rest status
+  for item in $SUMMARY_ITEMS; do
+    [ -z "$item" ] && continue
+    name="${item%%:*}"
+    rest="${item#*:}"
+    status="${rest%%:*}"
+    if [ "$status" = "ok" ]; then
+      OK_COUNT=$((OK_COUNT + 1))
+    else
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+      FAILED_NAMES="${FAILED_NAMES:+$FAILED_NAMES, }$name"
+    fi
+  done
+}
+
+write_status_file() {
+  local status_dir="$HOME/Library/Logs/mac-dev-up" result="ok"
+  if [ "$FAIL_COUNT" -gt 0 ]; then result="failed"; fi
+  mkdir -p "$status_dir"
+  {
+    echo "mac-dev-up $VERSION — $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "result: $result — ${OK_COUNT} ok, ${FAIL_COUNT} failed (${TOTAL}s total)"
+    local IFS='|' item name rest status elapsed
+    for item in $SUMMARY_ITEMS; do
+      [ -z "$item" ] && continue
+      name="${item%%:*}"
+      rest="${item#*:}"
+      status="${rest%%:*}"
+      elapsed="${rest#*:}"
+      echo "  $name: $status ($elapsed)"
+    done
+  } > "$status_dir/last-run.txt"
+}
+
 # Wraps a module function to track its success/failure and elapsed time.
 # Calling the module inside an if-condition disables errexit within it, which
 # is what lets modules continue past failed commands; run() records every
@@ -250,6 +287,8 @@ for arg in "$@"; do
     --dry-run)        DRY_RUN=true ;;
     --verbose)        VERBOSE=true ;;
     --exclude=*)      EXCLUDE_LIST="${arg#--exclude=}" ;;
+    --only=*)         ONLY_LIST="${arg#--only=}"; RUN_ALL=false ;;
+    --status)         SHOW_STATUS=true ;;
     --help)
       echo "Usage: mac-dev-up [options]"
       echo ""
@@ -266,6 +305,7 @@ for arg in "$@"; do
       echo "  --go               Update Go toolchain"
       echo "  --pipx             Update all pipx-installed packages"
       echo "  --mas              Update Mac App Store apps (requires mas-cli)"
+      echo "  --only=LIST        Run only these modules (comma-separated, e.g. --only=brew,npm)"
       echo "  --exclude=LIST     Skip modules (comma-separated, e.g. --exclude=macos,ruby)"
       echo ""
       echo "Execution modes:"
@@ -274,6 +314,7 @@ for arg in "$@"; do
       echo "  --fast             Parallel execution"
       echo "  --dry-run          Preview only"
       echo "  --verbose          Debug logs"
+      echo "  --status           Show the result of the last run and exit"
       echo "  --version          Print version and exit"
       echo "  --install-cron     Install macOS LaunchAgent (Sundays 10:00 AM)"
       echo "  --uninstall-cron   Remove the macOS LaunchAgent"
@@ -287,6 +328,46 @@ for arg in "$@"; do
     *) error "Unknown option: $arg" ;;
   esac
 done
+
+# -------------------- ONLY HELPER --------------------
+apply_only_list() {
+  [ -n "$ONLY_LIST" ] || return 0
+  local IFS=',' m
+  for m in $ONLY_LIST; do
+    m="${m//[[:space:]]/}"
+    case "$m" in
+      brew)     DO_BREW=true ;;
+      python)   DO_PYTHON=true ;;
+      npm)      DO_NPM=true ;;
+      ruby)     DO_RUBY=true ;;
+      macos)    DO_MACOS=true ;;
+      composer) DO_COMPOSER=true ;;
+      rust)     DO_RUST=true ;;
+      mise)     DO_MISE=true ;;
+      go)       DO_GO=true ;;
+      pipx)     DO_PIPX=true ;;
+      mas)      DO_MAS=true ;;
+      *) error "Unknown module in --only: $m" ;;
+    esac
+  done
+}
+
+apply_only_list
+
+# -------------------- STATUS --------------------
+show_status() {
+  local status_file="$HOME/Library/Logs/mac-dev-up/last-run.txt"
+  if [ ! -f "$status_file" ]; then
+    warn "No recorded run found at $status_file"
+    exit 0
+  fi
+  cat "$status_file"
+  exit 0
+}
+
+if [ "$SHOW_STATUS" = true ]; then
+  show_status
+fi
 
 # -------------------- CRON INSTALLER --------------------
 install_cron() {
@@ -594,6 +675,10 @@ update_go() {
   go_path=$(which go)
 
   if command -v mise >/dev/null && [[ "$go_path" == *"/mise/"* ]]; then
+    if [ "$DO_MISE" = true ] && ! is_excluded "mise"; then
+      log "mise Go detected — already updated by the mise module."
+      return
+    fi
     log "mise Go detected"
     run "mise upgrade go"
     return
@@ -716,18 +801,26 @@ TOTAL=$(( $(date +%s) - START ))
 
 print_summary
 
-case "$SUMMARY_ITEMS" in
-  *":failed:"*)
-    warn "Environment updated in ${TOTAL}s — some modules failed."
-    if [ "$DRY_RUN" = false ]; then
-      osascript -e 'display notification "Some updates failed — check the run summary." with title "mac-dev-up"'
-    fi
-    exit 1
-    ;;
-esac
+OK_COUNT=0
+FAIL_COUNT=0
+FAILED_NAMES=""
+summary_counts
+
+# Dry runs leave no trace: no status file, no notification.
+if [ "$DRY_RUN" = false ]; then
+  write_status_file
+fi
+
+if [ "$FAIL_COUNT" -gt 0 ]; then
+  warn "Environment updated in ${TOTAL}s — ${FAIL_COUNT} of $((OK_COUNT + FAIL_COUNT)) modules failed: ${FAILED_NAMES}"
+  if [ "$DRY_RUN" = false ]; then
+    osascript -e "display notification \"${FAIL_COUNT} of $((OK_COUNT + FAIL_COUNT)) modules failed: ${FAILED_NAMES}\" with title \"mac-dev-up\""
+  fi
+  exit 1
+fi
 
 success "Environment updated in ${TOTAL}s"
 
 if [ "$DRY_RUN" = false ]; then
-  osascript -e 'display notification "All updates completed successfully!" with title "mac-dev-up"'
+  osascript -e "display notification \"All ${OK_COUNT} modules updated successfully in ${TOTAL}s.\" with title \"mac-dev-up\""
 fi
